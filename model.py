@@ -133,6 +133,10 @@ class GPTConfig:
     flex_kernel_options: Optional[dict] = None
     eoc_idx : int = 5826319 # Issue #1. This is much larger than vocab_size (funny mistake, where is the tokenizer?)
     eos_idx : int = 5826320
+    K: int = 4  # abstraction ratio
+    L: int = 3  # number of abstraction levels
+    device: str = "cuda"
+    _compile: bool = True
 
 
 class GPT(nn.Module):
@@ -146,6 +150,8 @@ class GPT(nn.Module):
         ))
         self.lm_head = CastedLinear(config.n_embd, config.vocab_size)
         self.lm_head.weight.data.zero_()
+        self.device = config.device
+        self._compile = config._compile
 
     def forward(self, idx, target):
 
@@ -154,7 +160,7 @@ class GPT(nn.Module):
           return causal_mask
 
         S = idx.shape[1]
-        block_mask = create_block_mask(causal_mask, None, None, S, S, device="cuda", _compile=True)
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
         # forward the GPT model itself
         x = self.transformer.wte(idx)
@@ -186,31 +192,130 @@ class GPT(nn.Module):
 from typing import Optional
 import torch 
 
-# Embedding ensemble function - abstraction guidance & generation | execution & planning
+# Embedding ensemble function
+
+# v1. pure addition
 def sandwich_embedding(
-    token_embeddings: torch.Tensor,        # [B, S, D]
+    low_level_embeddings: torch.Tensor,                     # [B, L2, D]
+    token_embeddings: Optional[torch.Tensor] = None,        # [B, S, D]
     high_level_embeddings: Optional[torch.Tensor] = None,   # [B, L1, D]
-    low_level_embeddings: Optional[torch.Tensor] = None,    # [B, S, D]
     K: int = 1,                      # abstraction ratio
 ):
     """
     low-level embedding is sliced every K tokens
     passive observation on low-level execution is allowed
     """
+    if token_embeddings is None:
+        seq_len = 1
+        return low_level_embeddings[:, (seq_len * K)-1]
+
     seq_len = token_embeddings.shape[1]
+    L2 = low_level_embeddings.shape[1]
+    assert seq_len*K <= L2, f"Planning without grounding is not allowed: {seq_len} > {L2}"
+    token_embeddings += low_level_embeddings[:, 0:seq_len*K:K]
 
     if high_level_embeddings is not None: 
         L1 = high_level_embeddings.shape[1]
         assert L1 * K <= seq_len < (L1 + 1) * K, f"Execution without purpose or planning without grounding is not allowed: {L1 * K} < {seq_len} <= {(L1 + 1) * K}"
         cond_embeddings = high_level_embeddings.repeat_interleave(K, dim=1)
         token_embeddings[:, :L1 * K] += cond_embeddings
-    
-    if low_level_embeddings is not None: 
-        L2 = low_level_embeddings.shape[1]
-        assert seq_len <= L2, f"Planning without grounding is not allowed: {seq_len} > {L2}"
-        token_embeddings += low_level_embeddings[:, : seq_len]
 
     return token_embeddings
 
 
-# Abstraction model 
+# Conditional GPT model 
+# mode 1. (no target yet) recursive representation generation
+# mode 2. (with target) 
+
+class CondGPT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.num_layers = config.n_layer
+        self.K = config.K
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        ))
+        self.lm_head = CastedLinear(config.n_embd, config.vocab_size)
+        self.lm_head.weight.data.zero_()
+        self.device = config.device
+        self._compile = config._compile
+
+    def forward(self, idx, 
+            high_level_embeddings=None, 
+            low_level_embeddings=None
+    ):
+
+        def causal_mask(b, h, q_idx, kv_idx):
+          causal_mask = q_idx >= kv_idx
+          return causal_mask
+
+        S = idx.shape[1]
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        # forward the GPT model itself
+        x = self.transformer.wte(idx)
+        x = sandwich_embedding(low_level_embeddings, x, high_level_embeddings, self.K)
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)                              # sequence representation
+        logits = self.lm_head(x)
+        logits = 30 * torch.tanh(logits / 30)
+        logits = logits.float()
+
+        return x, logits
+
+    def inference(self, idx, high_level_embeddings, low_level_embeddings):
+        rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
+        idx_pred = torch.argmax(logits[:, -1, :], dim=-1)
+        return rep, idx_pred
+
+    def forward_with_target(self, idx, target, high_level_embeddings, low_level_embeddings):
+        rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
+        return rep, loss
+
+
+# Generative Abstraction Model
+class GAT(nn.Module): 
+
+    def __init__(self, config):
+        super().__init__()
+        self.K = config.K
+        self.L = config.L # abstraction level
+        self.condgpts = nn.ModuleList([CondGPT(config) for _ in range(config.L)])
+
+    def forward(self, idx, target): 
+        """
+        idx: [B, S]
+        target: [B, S]
+        """
+        # target is for lowest-level condGPT only
+        
+        # Initialize embeddings storage for each level
+        level_embeddings = [None] * self.L
+        level_sequences = [idx] + [[] for _ in range(1, self.L)]
+
+        level_embeddings[0], _ = self.condgpts[0].inference(idx)
+        seq_len = idx.shape[1]
+        for i in range(seq_len):
+            current_level = 0
+            t = i + 1 
+            if t % self.K == 0:
+                current_level += 1 
+            low_level_embeddings = level_embeddings[current_level - 1][:, 0:t:self.K]
+            level_embeddings[current_level], _ = self.condgpts[current_level].inference(level_sequences[current_level], low_level_embeddings)
+
+
+        
+
+
+
+
+
