@@ -306,16 +306,46 @@ class GAT(nn.Module):
 
     def forward(self, idx, target): 
         """
+        TBD: for multi-level sequence, compute loss at each level & ensemble them
         idx: [B, S]
         target: [B, S]
         """
-        # Dynamic programming: 
-        # on K-th token, call higher-level condGPT with current-level embedding and get back updated higher-level embedding
+        pass 
 
-        level_sequences = [idx] + [[] for _ in range(1, self.L)]
+    def generate(self, idx: list):
+        """
+        ToBeTested & Debugged 
+        """
+        abstract_embeddings = [None for l in range(self.L)]
 
-        def generate_level_embeddings(level):
-            idx = level_sequences[level]
+        def generate_level(l: int, curr: list, t: int, embeddings: Optional[torch.Tensor] = None) -> list: 
+        
+            if l <= self.L:
+                if len(curr[l]) < t:
+                    assert len(curr[l]) == t-1, f"Token counts {len(curr[l])} mismatch with # of step {t-1}"
+                    _, new_idx = self.condgpts[l].generate(curr[l][:t-1], abstract_embeddings[l+1], low_level_embedding)
+                    curr[l].append(new_idx)
+                
+                embeddings, = self.condgpts[l].forward(
+                        curr[l][:t], 
+                        abstract_embeddings[l+1], # higher level embeddings is explicitly cached
+                        low_level_embedding # lower level embeddings should be passed into recursion function
+                        )
+                    
+                if l > 0: # abstract embedding shall be stored w/o striding
+                    abstract_embeddings[l] = embeddings
+                
+                if t % self.K == 0: 
+                    return generate_level(l+1, curr, t // self.K, embeddings[:, ::self.K]) # only pass strided embedding to save memory
+            
+            return curr
+            
+
+            sequences = decorate_sequences(idx, self.L)
+            for t in range(1, len(idx)+1):
+                sequences = generate_level(0, sequences, t, None)
+                    
+        return curr
             
 
 
