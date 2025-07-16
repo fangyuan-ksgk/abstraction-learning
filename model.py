@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
+from constant import BOS_TOKEN_ID
+
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
@@ -227,6 +229,7 @@ def sandwich_embedding(
 # mode 1. (no target yet) recursive representation generation
 # mode 2. (with target) 
 
+# TBD: include KV-cache -- we'll need it. 
 class CondGPT(nn.Module):
 
     def __init__(self, config):
@@ -271,18 +274,28 @@ class CondGPT(nn.Module):
 
         return x, logits
 
-    def inference(self, idx, high_level_embeddings, low_level_embeddings):
+    def generate(self, idx, high_level_embeddings, low_level_embeddings):
         rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
         idx_pred = torch.argmax(logits[:, -1, :], dim=-1)
         return rep, idx_pred
 
-    def forward_with_target(self, idx, target, high_level_embeddings, low_level_embeddings):
+    def compute_loss(self, idx, target, high_level_embeddings, low_level_embeddings):
         rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
         return rep, loss
 
 
-# Generative Abstraction Model
+def decorate_sequences(idx: list, Lmax: int): 
+	if not isinstance(idx[0], list): 
+		idx = [idx] + [[BOS_TOKEN_ID] for l in range(1, Lmax)]
+	else:
+	  assert len(idx) == Lmax, f"Missing sequence for {Lmax} abstraction levels, currently only got {len(idx)}."
+	  idx = [seq if (len(seq)>0 and isistance(seq[0], int)) else [BOS_TOKEN_ID] for seq in idx]
+	return idx
+
+
+# Generative Abstraction Model : To be figured out ...
+
 class GAT(nn.Module): 
 
     def __init__(self, config):
@@ -296,25 +309,14 @@ class GAT(nn.Module):
         idx: [B, S]
         target: [B, S]
         """
-        # target is for lowest-level condGPT only
-        
-        # Initialize embeddings storage for each level
-        level_embeddings = [None] * self.L
+        # Dynamic programming: 
+        # on K-th token, call higher-level condGPT with current-level embedding and get back updated higher-level embedding
+
         level_sequences = [idx] + [[] for _ in range(1, self.L)]
 
-        level_embeddings[0], _ = self.condgpts[0].inference(idx)
-        seq_len = idx.shape[1]
-        for i in range(seq_len):
-            current_level = 0
-            t = i + 1 
-            if t % self.K == 0:
-                current_level += 1 
-            low_level_embeddings = level_embeddings[current_level - 1][:, 0:t:self.K]
-            level_embeddings[current_level], _ = self.condgpts[current_level].inference(level_sequences[current_level], low_level_embeddings)
-
-
-        
-
+        def generate_level_embeddings(level):
+            idx = level_sequences[level]
+            
 
 
 
