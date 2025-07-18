@@ -202,35 +202,37 @@ def is_valid_embed(embed: Optional[torch.Tensor]) -> bool:
 
 def prep_idx(idx: Union[torch.Tensor, list], L: int) -> list:
 
-    if isinstance(idx, torch.Tensor):
-        # For single tensor input, create L-1 empty tensors with proper batch dim
+    if isinstance(idx, torch.Tensor): # level-0 sequence
         B = idx.shape[0] if len(idx.shape) > 1 else 1
         if len(idx.shape) == 1:
-            idx = idx.unsqueeze(0)  # Add batch dimension if missing
+            idx = idx.unsqueeze(0)
         empty_tensor = torch.zeros((B, 0), device=idx.device, dtype=idx.dtype)
         return [idx] + [empty_tensor for _ in range(1, L)]
-    else:
-        assert len(idx) == L, f"Missing sequence for {L} abstraction levels, currently only got {len(idx)}."
-        
-        # Get reference device and dtype from first non-empty sequence
+
+    else:  # all-level sequences (list of tensors)
+        assert isinstance(idx, list) and len(idx) == L, f"Missing sequence for {L} abstraction levels, currently only got {len(idx)}."
         ref_seq = next((s for s in idx if isinstance(s, torch.Tensor) and s.numel() > 0), None)
-        if ref_seq is None and len(idx) > 0 and isinstance(idx[0], list) and len(idx[0]) > 0:
-            ref_seq = torch.tensor(idx[0])
-        
-        if ref_seq is None:
-            raise ValueError("No valid reference sequence found to determine device and dtype")
-            
+        assert ref_seq is not None, "No valid reference sequence found to determine device and dtype"
         device, dtype = ref_seq.device, ref_seq.dtype
         B = ref_seq.shape[0] if len(ref_seq.shape) > 1 else 1
+        empty_tensor = torch.zeros((B, 0), device=device, dtype=dtype)
         
-        # Process each sequence
-        return [
-            (torch.tensor(seq, device=device, dtype=dtype).unsqueeze(0) if isinstance(seq, list) and len(seq) > 0
-             else (seq if isinstance(seq, torch.Tensor) and seq.numel() > 0 
-                   else torch.zeros((B, 0), device=device, dtype=dtype)))
-            for seq in idx
-        ]
+        sequences = []
+        for seq in idx: 
+            assert isinstance(seq, torch.Tensor), "All sequences must be tensors"
+            if seq.numel() == 0:
+                seq = empty_tensor
+            else:
+                seq = seq.unsqueeze(0) if len(seq.shape) == 1 else seq
+            sequences.append(seq)
+
+        return sequences
         
+
+def infer_time_step(idx: list, K: int)->int:
+    # longest time step provided by the leve-wise sequence
+    return max([seq.shape[1] * (K**l) for l, seq in enumerate(idx)])
+
 # --------------------------------------------------------------------------------------------------------------------------
 
 
@@ -344,25 +346,29 @@ class GAT(nn.Module):
         pass 
 
     def generate(self, idx: Union[torch.Tensor, list]):
-        """
-        ToBeTested & Debugged 
-        """
+    
         embed_cache = [None for l in range(self.L)]
 
         def generate_level(l: int, curr: list, t: int, low_embed: Optional[torch.Tensor] = None) -> list: 
             """
             low_level_embeddings is strided to reduce carbon footprint :>
             """
-        
+            # print(f"generate level {l} at time {t} x {self.K**l}")
+
             if l <= self.L:
-                if len(curr[l]) < t:
-                    assert len(curr[l]) == t-1, f"Token counts {len(curr[l])} mismatch with # of step {t-1}"
-                    _, new_idx = self.condgpts[l].generate(curr[l][:t-1], embed_cache[l+1], low_embed)
-                    curr[l].append(new_idx)
+                n_tok = curr[l].size(1)
+                if n_tok < t:
+                    assert n_tok == t-1, f"Token counts {n_tok} mismatch with # of step {t-1}"
+                    _, new_idx = self.condgpts[l].generate(
+                                        curr[l][:, :t-1], 
+                                        embed_cache[l+1] if l < self.L-1 else None, 
+                                        low_embed
+                                    )
+                    curr[l] = torch.cat([curr[l], new_idx.unsqueeze(1)], dim=1)
                 
                 embeddings, _ = self.condgpts[l].forward(
-                        curr[l][:t], 
-                        embed_cache[l+1], 
+                        curr[l][:, :t], 
+                        embed_cache[l+1] if l < self.L-1 else None, 
                         low_embed
                         )
                     
@@ -373,10 +379,10 @@ class GAT(nn.Module):
                     return generate_level(l+1, curr, t // self.K, embeddings[:, ::self.K]) # only pass strided embedding to save memory
             
             return curr
-            
 
         sequences = prep_idx(idx, self.L)
-        for t in range(1, len(idx)+1):
+        T = infer_time_step(sequences, self.K)
+        for t in range(1, T+2):
             sequences = generate_level(0, sequences, t, None)
                     
         return sequences
