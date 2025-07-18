@@ -196,6 +196,9 @@ import torch
 
 # Embedding ensemble function
 
+def is_valid_embed(embed: Optional[torch.Tensor]) -> bool:
+    return embed is not None and embed.shape[1]>0
+
 # v1. pure addition
 
 def sandwich_embedding(
@@ -207,20 +210,20 @@ def sandwich_embedding(
     """
     sandwich_i = tok[i-1] + low[i] + high[(i-1)//K] for i in [0, 1, ..., S]
     """
-    assert tok_embed is not None or low_embed is not None, "tok_embed or low_embed must be provided"
+    assert is_valid_embed(tok_embed) or is_valid_embed(low_embed), "tok_embed or low_embed must be provided"
 
-    if tok_embed is None: # generation mode, first abstract token
-        assert low_embed is not None, "When tok_embed is None, low_embed must be provided"
+    if is_valid_embed(tok_embed): # generation mode, first abstract token
+        assert is_valid_embed(low_embed), "When tok_embed is None, low_embed must be provided"
         return low_embed[:, :1]
 
     S1 = low_embed.shape[1]
     S2 = high_embed.shape[1]
     S = tok_embed.shape[1]
     
-    if high_embed is not None: # planning guidance
+    if is_valid_embed(high_embed): # planning guidance
         tok_embed[:, :min(S, K * S2)] += high_embed.repeat_interleave(K, dim=1)[:, :min(S, K * S2)]
     
-    if low_embed is not None: # grounding
+    if is_valid_embed(low_embed): # grounding
         tok_embed = torch.cat([torch.zeros(*tok_embed.shape[:1], 1, tok_embed.shape[2], device=tok_embed.device, dtype=tok_embed.dtype), tok_embed], dim=1)
         tok_embed[:, :min(S1, S + 1)] += low_embed[:, 0:min(S1, S + 1)]
 
