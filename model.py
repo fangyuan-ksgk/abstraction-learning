@@ -197,32 +197,34 @@ import torch
 # Embedding ensemble function
 
 # v1. pure addition
+
 def sandwich_embedding(
-    low_level_embeddings: torch.Tensor,                     # [B, L2, D]
-    token_embeddings: Optional[torch.Tensor] = None,        # [B, S, D]
-    high_level_embeddings: Optional[torch.Tensor] = None,   # [B, L1, D]
+    low_embed: Optional[torch.Tensor] = None,    # [B, S1, D]
+    tok_embed: Optional[torch.Tensor] = None,    # [B, S, D]
+    high_embed: Optional[torch.Tensor] = None,   # [B, S2, D]
     K: int = 1,                      # abstraction ratio
-):
+    ):
     """
-    low-level embedding is sliced every K tokens
-    passive observation on low-level execution is allowed
+    sandwich_i = tok[i-1] + low[i] + high[(i-1)//K] for i in [0, 1, ..., S]
     """
-    if token_embeddings is None:
-        seq_len = 1
-        return low_level_embeddings[:, (seq_len * K)-1]
+    assert tok_embed is not None or low_embed is not None, "tok_embed or low_embed must be provided"
 
-    seq_len = token_embeddings.shape[1]
-    L2 = low_level_embeddings.shape[1]
-    assert seq_len*K <= L2, f"Planning without grounding is not allowed: {seq_len} > {L2}"
-    token_embeddings += low_level_embeddings[:, 0:seq_len*K:K]
+    if tok_embed is None: # generation mode, first abstract token
+        assert low_embed is not None, "When tok_embed is None, low_embed must be provided"
+        return low_embed[:, :1]
 
-    if high_level_embeddings is not None: 
-        L1 = high_level_embeddings.shape[1]
-        assert L1 * K <= seq_len < (L1 + 1) * K, f"Execution without purpose or planning without grounding is not allowed: {L1 * K} < {seq_len} <= {(L1 + 1) * K}"
-        cond_embeddings = high_level_embeddings.repeat_interleave(K, dim=1)
-        token_embeddings[:, :L1 * K] += cond_embeddings
+    S1 = low_embed.shape[1]
+    S2 = high_embed.shape[1]
+    S = tok_embed.shape[1]
+    
+    if high_embed is not None: # planning guidance
+        tok_embed[:, :min(S, K * S2)] += high_embed.repeat_interleave(K, dim=1)[:, :min(S, K * S2)]
+    
+    if low_embed is not None: # grounding
+        tok_embed = torch.cat([torch.zeros(*tok_embed.shape[:1], 1, tok_embed.shape[2], device=tok_embed.device, dtype=tok_embed.dtype), tok_embed], dim=1)
+        tok_embed[:, :min(S1, S + 1)] += low_embed[:, 0:min(S1, S + 1)]
 
-    return token_embeddings
+    return tok_embed
 
 
 # Conditional GPT model 
@@ -318,7 +320,10 @@ class GAT(nn.Module):
         """
         abstract_embeddings = [None for l in range(self.L)]
 
-        def generate_level(l: int, curr: list, t: int, embeddings: Optional[torch.Tensor] = None) -> list: 
+        def generate_level(l: int, curr: list, t: int, low_level_embeddings: Optional[torch.Tensor] = None) -> list: 
+            """
+            low_level_embeddings is strided to reduce carbon footprint :>
+            """
         
             if l <= self.L:
                 if len(curr[l]) < t:
