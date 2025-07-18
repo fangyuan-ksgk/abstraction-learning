@@ -212,18 +212,18 @@ def sandwich_embedding(
     """
     assert is_valid_embed(tok_embed) or is_valid_embed(low_embed), "tok_embed or low_embed must be provided"
 
-    if is_valid_embed(tok_embed): # generation mode, first abstract token
+    if not is_valid_embed(tok_embed): # generation mode, first abstract token
         assert is_valid_embed(low_embed), "When tok_embed is None, low_embed must be provided"
         return low_embed[:, :1]
-
-    S1 = low_embed.shape[1]
-    S2 = high_embed.shape[1]
+    
     S = tok_embed.shape[1]
     
     if is_valid_embed(high_embed): # planning guidance
+        S2 = high_embed.shape[1]
         tok_embed[:, :min(S, K * S2)] += high_embed.repeat_interleave(K, dim=1)[:, :min(S, K * S2)]
     
     if is_valid_embed(low_embed): # grounding
+        S1 = low_embed.shape[1]
         tok_embed = torch.cat([torch.zeros(*tok_embed.shape[:1], 1, tok_embed.shape[2], device=tok_embed.device, dtype=tok_embed.dtype), tok_embed], dim=1)
         tok_embed[:, :min(S1, S + 1)] += low_embed[:, 0:min(S1, S + 1)]
 
