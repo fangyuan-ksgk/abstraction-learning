@@ -191,7 +191,7 @@ class GPT(nn.Module):
 # v2. attention-based (AR model) requires left-shift on plan embeddings
 # v2. attention-based (diffusion model) aligns embedding temporally
 
-from typing import Optional
+from typing import Optional, Union
 import torch 
 
 # Utility function
@@ -200,6 +200,37 @@ import torch
 def is_valid_embed(embed: Optional[torch.Tensor]) -> bool:
     return embed is not None and embed.shape[1]>0
 
+def prep_idx(idx: Union[torch.Tensor, list], L: int) -> list:
+
+    if isinstance(idx, torch.Tensor):
+        # For single tensor input, create L-1 empty tensors with proper batch dim
+        B = idx.shape[0] if len(idx.shape) > 1 else 1
+        if len(idx.shape) == 1:
+            idx = idx.unsqueeze(0)  # Add batch dimension if missing
+        empty_tensor = torch.zeros((B, 0), device=idx.device, dtype=idx.dtype)
+        return [idx] + [empty_tensor for _ in range(1, L)]
+    else:
+        assert len(idx) == L, f"Missing sequence for {L} abstraction levels, currently only got {len(idx)}."
+        
+        # Get reference device and dtype from first non-empty sequence
+        ref_seq = next((s for s in idx if isinstance(s, torch.Tensor) and s.numel() > 0), None)
+        if ref_seq is None and len(idx) > 0 and isinstance(idx[0], list) and len(idx[0]) > 0:
+            ref_seq = torch.tensor(idx[0])
+        
+        if ref_seq is None:
+            raise ValueError("No valid reference sequence found to determine device and dtype")
+            
+        device, dtype = ref_seq.device, ref_seq.dtype
+        B = ref_seq.shape[0] if len(ref_seq.shape) > 1 else 1
+        
+        # Process each sequence
+        return [
+            (torch.tensor(seq, device=device, dtype=dtype).unsqueeze(0) if isinstance(seq, list) and len(seq) > 0
+             else (seq if isinstance(seq, torch.Tensor) and seq.numel() > 0 
+                   else torch.zeros((B, 0), device=device, dtype=dtype)))
+            for seq in idx
+        ]
+        
 # --------------------------------------------------------------------------------------------------------------------------
 
 
@@ -258,7 +289,7 @@ class CondGPT(nn.Module):
     def forward(self, idx, high_embed, low_embed):
 
         x = self.transformer.wte(idx)
-        x = sandwich_embedding(low_embed, x, high_embed, self.K) # one-line change
+        x = sandwich_embedding(low_embed, x, high_embed, self.K) # one-liner
         x = norm(x)
         x0 = x
         v1 = None
@@ -273,7 +304,7 @@ class CondGPT(nn.Module):
         for i in range(self.num_layers):
             x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
-        x = norm(x)                              # sequence representation
+        x = norm(x)                              
         logits = self.lm_head(x)
         logits = 30 * torch.tanh(logits / 30)
         logits = logits.float()
@@ -312,13 +343,13 @@ class GAT(nn.Module):
         """
         pass 
 
-    def generate(self, idx: list):
+    def generate(self, idx: Union[torch.Tensor, list]):
         """
         ToBeTested & Debugged 
         """
-        abstract_embeddings = [None for l in range(self.L)]
+        embed_cache = [None for l in range(self.L)]
 
-        def generate_level(l: int, curr: list, t: int, low_level_embeddings: Optional[torch.Tensor] = None) -> list: 
+        def generate_level(l: int, curr: list, t: int, low_embed: Optional[torch.Tensor] = None) -> list: 
             """
             low_level_embeddings is strided to reduce carbon footprint :>
             """
@@ -326,17 +357,17 @@ class GAT(nn.Module):
             if l <= self.L:
                 if len(curr[l]) < t:
                     assert len(curr[l]) == t-1, f"Token counts {len(curr[l])} mismatch with # of step {t-1}"
-                    _, new_idx = self.condgpts[l].generate(curr[l][:t-1], abstract_embeddings[l+1], low_level_embedding)
+                    _, new_idx = self.condgpts[l].generate(curr[l][:t-1], embed_cache[l+1], low_embed)
                     curr[l].append(new_idx)
                 
-                embeddings, = self.condgpts[l].forward(
+                embeddings, _ = self.condgpts[l].forward(
                         curr[l][:t], 
-                        abstract_embeddings[l+1], # higher level embeddings is explicitly cached
-                        low_level_embedding # lower level embeddings should be passed into recursion function
+                        embed_cache[l+1], 
+                        low_embed
                         )
                     
-                if l > 0: # abstract embedding shall be stored w/o striding
-                    abstract_embeddings[l] = embeddings
+                if l > 0: 
+                    embed_cache[l] = embeddings
                 
                 if t % self.K == 0: 
                     return generate_level(l+1, curr, t // self.K, embeddings[:, ::self.K]) # only pass strided embedding to save memory
@@ -344,11 +375,11 @@ class GAT(nn.Module):
             return curr
             
 
-            sequences = decorate_sequences(idx, self.L)
-            for t in range(1, len(idx)+1):
-                sequences = generate_level(0, sequences, t, None)
+        sequences = prep_idx(idx, self.L)
+        for t in range(1, len(idx)+1):
+            sequences = generate_level(0, sequences, t, None)
                     
-        return curr
+        return sequences
             
 
 
