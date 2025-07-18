@@ -194,12 +194,18 @@ class GPT(nn.Module):
 from typing import Optional
 import torch 
 
-# Embedding ensemble function
+# Utility function
+# --------------------------------------------------------------------------------------------------------------------------
 
 def is_valid_embed(embed: Optional[torch.Tensor]) -> bool:
     return embed is not None and embed.shape[1]>0
 
-# v1. pure addition
+# --------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Sandwich embedding: incorporate planning guidance & grounding
+# --------------------------------------------------------------------------------------------------------------------------
 
 def sandwich_embedding(
     low_embed: Optional[torch.Tensor] = None,    # [B, S1, D]
@@ -230,11 +236,10 @@ def sandwich_embedding(
     return tok_embed
 
 
-# Conditional GPT model 
-# mode 1. (no target yet) recursive representation generation
-# mode 2. (with target) 
+# Conditional GPT takes in higher & lower embedding conditioning
+# TBD: - include KV-cache
+# --------------------------------------------------------------------------------------------------------------------------
 
-# TBD: include KV-cache -- we'll need it. 
 class CondGPT(nn.Module):
 
     def __init__(self, config):
@@ -250,24 +255,20 @@ class CondGPT(nn.Module):
         self.device = config.device
         self._compile = config._compile
 
-    def forward(self, idx, 
-            high_level_embeddings=None, 
-            low_level_embeddings=None
-    ):
+    def forward(self, idx, high_embed, low_embed):
+
+        x = self.transformer.wte(idx)
+        x = sandwich_embedding(low_embed, x, high_embed, self.K) # one-line change
+        x = norm(x)
+        x0 = x
+        v1 = None
 
         def causal_mask(b, h, q_idx, kv_idx):
           causal_mask = q_idx >= kv_idx
           return causal_mask
 
-        S = idx.shape[1]
+        S = x.shape[1]
         block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
-        # forward the GPT model itself
-        x = self.transformer.wte(idx)
-        x = sandwich_embedding(low_level_embeddings, x, high_level_embeddings, self.K)
-        x = norm(x)
-        x0 = x
-        v1 = None
 
         for i in range(self.num_layers):
             x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
@@ -279,27 +280,21 @@ class CondGPT(nn.Module):
 
         return x, logits
 
-    def generate(self, idx, high_level_embeddings, low_level_embeddings):
-        rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
+    def generate(self, idx, high_embed, low_embed):
+        rep, logits = self.forward(idx, high_embed, low_embed)
         idx_pred = torch.argmax(logits[:, -1, :], dim=-1)
         return rep, idx_pred
 
-    def compute_loss(self, idx, target, high_level_embeddings, low_level_embeddings):
-        rep, logits = self.forward(idx, high_level_embeddings, low_level_embeddings)
+    def compute_loss(self, idx, target, high_embed, low_embed):
+        rep, logits = self.forward(idx, high_embed, low_embed)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
         return rep, loss
 
-
-def decorate_sequences(idx: list, Lmax: int): 
-	if not isinstance(idx[0], list): 
-		idx = [idx] + [[BOS_TOKEN_ID] for l in range(1, Lmax)]
-	else:
-	  assert len(idx) == Lmax, f"Missing sequence for {Lmax} abstraction levels, currently only got {len(idx)}."
-	  idx = [seq if (len(seq)>0 and isistance(seq[0], int)) else [BOS_TOKEN_ID] for seq in idx]
-	return idx
+# --------------------------------------------------------------------------------------------------------------------------
 
 
-# Generative Abstraction Model : To be figured out ...
+# Generative Abstraction Model (GAT)
+# --------------------------------------------------------------------------------------------------------------------------
 
 class GAT(nn.Module): 
 
