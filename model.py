@@ -353,9 +353,9 @@ class GAT(nn.Module):
             """
             low_level_embeddings is strided to reduce carbon footprint :>
             """
-            # print(f"generate level {l} at time {t} x {self.K**l}")
+            # print(f"  : generate level {l} at time {t} x {self.K**l}")
 
-            if l <= self.L:
+            if l < self.L:
                 n_tok = curr[l].size(1)
                 if n_tok < t:
                     assert n_tok == t-1, f"Token counts {n_tok} mismatch with # of step {t-1}"
