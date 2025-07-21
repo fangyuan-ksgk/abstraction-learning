@@ -288,7 +288,7 @@ class CondGPT(nn.Module):
         self.device = config.device
         self._compile = config._compile
 
-    def forward(self, idx, high_embed, low_embed):
+    def forward(self, idx, high_embed, low_embed): 
 
         x = self.transformer.wte(idx)
         x = sandwich_embedding(low_embed, x, high_embed, self.K) # one-liner
@@ -326,6 +326,7 @@ class CondGPT(nn.Module):
 # --------------------------------------------------------------------------------------------------------------------------
 
 
+
 # Generative Abstraction Model (GAT)
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -337,13 +338,42 @@ class GAT(nn.Module):
         self.L = config.L # abstraction level
         self.condgpts = nn.ModuleList([CondGPT(config) for _ in range(config.L)])
 
-    def forward(self, idx, target): 
+    def forward(self, idx: list, target: list): 
         """
-        TBD: for multi-level sequence, compute loss at each level & ensemble them
-        idx: [B, S]
-        target: [B, S]
+        TBD: add-in weight for different levels, conditioned-based & condition-free loss etc.
         """
-        pass 
+
+        embed_cache = [None for l in range(self.L)]
+
+        def compute_loss_level(l: int, curr_loss: torch.Tensor, t: int, low_embed: Optional[torch.Tensor] = None):
+            
+            if l < self.L:
+                n_tok = idx[l].size(1)
+                assert n_tok >= t, f"Missing tokens at level {l} at time {t * self.K**l}"
+
+                if l == 0:
+                    target_l = target[l][:, 1:] 
+                else:
+                    target_l = target[l] # first token is generated with lower-level grounding
+
+                embeddings, mixed_loss_l = self.condgpts[l].compute_loss(
+                    idx[l][:, :-1],
+                    target_l,
+                    embed_cache[l+1] if l < self.L-1 else None,
+                    low_embed
+                )
+
+                curr_loss += mixed_loss_l
+
+                if l > 0: 
+                    embed_cache[l] = embeddings
+
+                if t % self.K == 0: 
+                    return compute_loss_level(l+1, curr_loss, t // self.K, embeddings[:, ::self.K])
+
+            return curr_loss
+
+        
 
     def generate(self, idx: Union[torch.Tensor, list]):
     
@@ -387,6 +417,8 @@ class GAT(nn.Module):
                     
         return sequences
             
+# --------------------------------------------------------------------------------------------------------------------------
+
 
 
 
