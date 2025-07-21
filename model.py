@@ -340,7 +340,8 @@ class GAT(nn.Module):
 
     def forward(self, idx: list, target: list): 
         """
-        TBD: add-in weight for different levels, conditioned-based & condition-free loss etc.
+        TBD 1: test this. 
+        TBD 2: add-in weight for different levels, conditioned-based & condition-free loss etc.
         """
 
         embed_cache = [None for l in range(self.L)]
@@ -372,6 +373,14 @@ class GAT(nn.Module):
                     return compute_loss_level(l+1, curr_loss, t // self.K, embeddings[:, ::self.K])
 
             return curr_loss
+
+        T = infer_time_step(idx, self.K) if self.L > 1 else infer_time_step(idx, self.K) + 1
+        loss = torch.tensor(0.0, device=idx[0].device)
+        for t in range(0, T, self.K):
+            loss += compute_loss_level(0, loss, t, None)
+
+        return loss
+
 
         
 
