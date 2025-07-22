@@ -227,11 +227,17 @@ def prep_idx(idx: Union[torch.Tensor, list], L: int) -> list:
             sequences.append(seq)
 
         return sequences
-        
 
-def infer_time_step(idx: list, K: int)->int:
-    # longest time step provided by the leve-wise sequence
-    return max([seq.shape[1] * (K**l) for l, seq in enumerate(idx)])
+def infer_time_step(idx: list, K: int, mode: str = "max")->int:
+    """
+    Use max time for generation (interpret past + next step), min time for training (full conditions)
+    """
+    if mode == "max":
+        return max([seq.shape[1] * (K**l) for l, seq in enumerate(idx)])
+    elif mode == "min":
+        return min([seq.shape[1] * (K**l) for l, seq in enumerate(idx)])
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -320,7 +326,7 @@ class CondGPT(nn.Module):
 
     def compute_loss(self, idx, target, high_embed, low_embed):
         rep, logits = self.forward(idx, high_embed, low_embed)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
         return rep, loss
 
 # --------------------------------------------------------------------------------------------------------------------------
@@ -338,10 +344,10 @@ class GAT(nn.Module):
         self.L = config.L # abstraction level
         self.condgpts = nn.ModuleList([CondGPT(config) for _ in range(config.L)])
 
-    def forward(self, idx: list, target: list): 
+    def forward(self, idx: list): 
         """
-        TBD 1: test this. 
-        TBD 2: add-in weight for different levels, conditioned-based & condition-free loss etc.
+        Un-weighted ver. of loss ensemble
+        TBD: add-in weight for different levels, conditioned-based & condition-free loss etc.
         """
 
         embed_cache = [None for l in range(self.L)]
@@ -352,14 +358,15 @@ class GAT(nn.Module):
                 n_tok = idx[l].size(1)
                 assert n_tok >= t, f"Missing tokens at level {l} at time {t * self.K**l}"
 
-                if l == 0:
-                    target_l = target[l][:, 1:] 
-                else:
-                    target_l = target[l] # first token is generated with lower-level grounding
-
-                embeddings, mixed_loss_l = self.condgpts[l].compute_loss(
+                _, mixed_loss_l = self.condgpts[l].compute_loss(
                     idx[l][:, :-1],
-                    target_l,
+                    idx[l][:, 1:] if l == 0 else idx[l],
+                    embed_cache[l+1] if l < self.L-1 else None,
+                    low_embed
+                )
+
+                embeds, _ = self.condgpts[l].forward(
+                    idx[l][:, :t],
                     embed_cache[l+1] if l < self.L-1 else None,
                     low_embed
                 )
@@ -367,21 +374,20 @@ class GAT(nn.Module):
                 curr_loss += mixed_loss_l
 
                 if l > 0: 
-                    embed_cache[l] = embeddings
+                    embed_cache[l] = embeds
 
                 if t % self.K == 0: 
-                    return compute_loss_level(l+1, curr_loss, t // self.K, embeddings[:, ::self.K])
+                    return compute_loss_level(l+1, curr_loss, t // self.K, embeds[:, ::self.K])
 
             return curr_loss
 
-        T = infer_time_step(idx, self.K) if self.L > 1 else infer_time_step(idx, self.K) + 1
+        T = infer_time_step(idx, self.K, mode="min")
         loss = torch.tensor(0.0, device=idx[0].device)
-        for t in range(0, T, self.K):
-            loss += compute_loss_level(0, loss, t, None)
+
+        for t in range(self.K, T + self.K, self.K): 
+            loss = compute_loss_level(0, loss, min(t, T), None)
 
         return loss
-
-
         
 
     def generate(self, idx: Union[torch.Tensor, list]):
@@ -420,7 +426,7 @@ class GAT(nn.Module):
             return curr
 
         sequences = prep_idx(idx, self.L)
-        T = infer_time_step(sequences, self.K)
+        T = infer_time_step(sequences, self.K, mode="max")
         for t in range(1, T+2):
             sequences = generate_level(0, sequences, t, None)
                     
