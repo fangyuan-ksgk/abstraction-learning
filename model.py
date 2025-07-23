@@ -324,17 +324,36 @@ class CondGPT(nn.Module):
         idx_pred = torch.argmax(logits[:, -1, :], dim=-1)
         return rep, idx_pred
 
-    def compute_loss(self, idx, target, high_embed, low_embed):
+    def compute_loss(self, idx, target, high_embed, low_embed, weight):
         rep, logits = self.forward(idx, high_embed, low_embed)
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1), reduction="none")
+        loss = (loss * weight.repeat_interleave(logits.shape[0], dim=0)).mean()
         return rep, loss
 
 # --------------------------------------------------------------------------------------------------------------------------
 
 
 
+
 # Generative Abstraction Model (GAT)
 # --------------------------------------------------------------------------------------------------------------------------
+
+@dataclass
+class GATConfig:
+    vocab_size : int = 50304
+    n_layer : int = 12
+    n_head : int = 6
+    n_embd : int = 768
+    flex_kernel_options: Optional[dict] = None
+    eoc_idx : int = 5826319 
+    eos_idx : int = 5826320
+    K: int = 4  # abstraction ratio
+    L: int = 3  # number of abstraction levels
+    device: str = "cuda"
+    _compile: bool = True
+    level_weights: Optional[list] = None
+    w_cond: float = 1.0
+    w_uncond: float = 1.0
 
 class GAT(nn.Module): 
 
@@ -342,6 +361,8 @@ class GAT(nn.Module):
         super().__init__()
         self.K = config.K
         self.L = config.L # abstraction level
+        self.level_weights = config.level_weights if config.level_weights is not None else [1.0] * config.L
+        self.w_cond, self.w_uncond = config.w_cond, config.w_uncond
         self.condgpts = nn.ModuleList([CondGPT(config) for _ in range(config.L)])
 
     def forward(self, idx: list): 
@@ -350,19 +371,23 @@ class GAT(nn.Module):
         TBD: add-in weight for different levels, conditioned-based & condition-free loss etc.
         """
 
+        assert len(idx) == self.L, f"Missing sequence for {self.L} abstraction levels, currently only got {len(idx)}."
         embed_cache = [None for l in range(self.L)]
 
         def compute_loss_level(l: int, curr_loss: torch.Tensor, t: int, low_embed: Optional[torch.Tensor] = None):
+            # print(f"  : compute loss level {l} at time {t} x {self.K**l}")
             
             if l < self.L:
                 n_tok = idx[l].size(1)
                 assert n_tok >= t, f"Missing tokens at level {l} at time {t * self.K**l}"
+                weights = self.get_weights(l, t, idx[l])
 
                 _, mixed_loss_l = self.condgpts[l].compute_loss(
                     idx[l][:, :-1],
                     idx[l][:, 1:] if l == 0 else idx[l],
                     embed_cache[l+1] if l < self.L-1 else None,
-                    low_embed
+                    low_embed,
+                    weights[1:] if l == 0 else weights
                 )
 
                 embeds, _ = self.condgpts[l].forward(
@@ -431,6 +456,12 @@ class GAT(nn.Module):
             sequences = generate_level(0, sequences, t, None)
                     
         return sequences
+
+    def get_weights(self, l: int, t: int, idx: torch.Tensor): 
+        S = idx.shape[1] if idx.ndim == 2 else idx.shape[0]
+        weights = torch.full((S,), self.w_uncond * self.level_weights[l], dtype=idx.dtype, device=idx.device)
+        weights[:t] = self.w_cond * self.level_weights[l]
+        return weights
             
 # --------------------------------------------------------------------------------------------------------------------------
 
