@@ -5,10 +5,15 @@ import torch.nn as nn
 from pathlib import Path
 from typing import Optional
 import torch.nn.functional as F
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
+from utils import SeqFlat
+
+
+# GPT 
+# --------------------------------------------------------------------------------------------------------------------------
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -182,5 +187,116 @@ class GPT(nn.Module):
 
 # (I). Attention pattern: Hiearchical Causality 
 # (II). GAT: GPT with level-wise WTE & LM head
+
+
+# rocky implementation, need re-construction
+
+@dataclass
+class GATConfig:
+    vocab_size : int = 50304
+    n_layer : int = 12
+    n_head : int = 6
+    n_embd : int = 768
+    flex_kernel_options: Optional[dict] = None
+    eoc_idx : int = 5826319 
+    eos_idx : int = 5826320
+    K: int = 4  # abstraction ratio
+    L: int = 3  # number of abstraction levels
+    vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
+    device: str = "cuda"
+    _compile: bool = True
+    level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
+
+
+class GAT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.num_layers = config.n_layer
+        self.L = config.L
+        self.seqflat = SeqFlat(config.K, config.L)
+        self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
+        self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
+        for lm_head in self.lm_heads:
+            lm_head.weight.data.zero_()
+        
+        self.transformer = nn.ModuleDict(dict(
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        ))
+
+        self.level_embeddings = nn.Parameter(torch.randn(config.L, config.n_embd))
+
+        self.device = config.device
+        self._compile = config._compile
+
+    def forward(self, idx_seq, t_seq=None):
+    
+        idx, levels, timestamps = self.seqflat(idx_seq, t_seq)
+        input_idx = idx[:, :-1]      
+        target_idx = idx[:, 1:]      
+        input_levels = levels[:, :-1]    
+        target_levels = levels[:, 1:]    
+
+        def causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            return causal_mask
+
+        S = input_idx.shape[1] 
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        B, S = input_idx.shape
+        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L):
+            level_mask = (input_levels == l) 
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[level_mask] = level_embed
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+        
+        total_loss = 0.0 
+        total_weight = 0.0
+        
+        for l in range(self.L):
+            target_level_mask = (target_levels == l) 
+            if target_level_mask.any():  
+                level_hidden = x[target_level_mask]  
+                level_logits = self.lm_heads[l](level_hidden)  
+                level_logits = 30 * torch.tanh(level_logits / 30)
+                level_logits = level_logits.float()
+                
+                level_targets = target_idx[target_level_mask]  
+                
+                level_loss = F.cross_entropy(level_logits, level_targets)
+                weight = getattr(self, 'level_weights', [1.0] * self.L)[l] 
+                weighted_loss = weight * level_loss
+                total_loss += weighted_loss
+                total_weight += weight
+        
+        if total_weight > 0:
+            total_loss = total_loss / total_weight
+        
+        return total_loss
+    
+    
+    
+    
+
+# List of per-level sequence & Timestamps to form an object for GAT. 
+# An instance where K = 2, L = 3 would have time-stamps 
+# [[1,2,3,4], [2,4], [4]] -- time-stamp will be used for level-agnostic relative position encoding
+# to flatten the sequences in a list object, order them first via time-stamp, then according to level
+
+
+
 
 
