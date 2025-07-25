@@ -228,6 +228,7 @@ class GAT(nn.Module):
 
         self.device = config.device
         self._compile = config._compile
+        self.level_weights = config.level_weights
 
     def forward(self, idx_seq, t_seq=None):
     
@@ -247,7 +248,7 @@ class GAT(nn.Module):
         B, S = input_idx.shape
         x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
 
-        for l in range(self.L):
+        for l in range(self.L): # per-level embedding
             level_mask = (input_levels == l) 
             if level_mask.any():  
                 level_tokens = input_idx[level_mask]  
@@ -266,37 +267,67 @@ class GAT(nn.Module):
         total_loss = 0.0 
         total_weight = 0.0
         
-        for l in range(self.L):
+        for l in range(self.L): # per-level projection
             target_level_mask = (target_levels == l) 
             if target_level_mask.any():  
-                level_hidden = x[target_level_mask]  
-                level_logits = self.lm_heads[l](level_hidden)  
-                level_logits = 30 * torch.tanh(level_logits / 30)
-                level_logits = level_logits.float()
-                
-                level_targets = target_idx[target_level_mask]  
-                
-                level_loss = F.cross_entropy(level_logits, level_targets)
-                weight = getattr(self, 'level_weights', [1.0] * self.L)[l] 
-                weighted_loss = weight * level_loss
-                total_loss += weighted_loss
-                total_weight += weight
+                level_logits = self.lm_heads[l](x[target_level_mask])  
+                level_logits = 30 * torch.tanh(level_logits / 30).float()                
+                level_loss = F.cross_entropy(level_logits, target_idx[target_level_mask])
+                total_loss += self.level_weights[l] * level_loss
+                total_weight += self.level_weights[l]
         
         if total_weight > 0:
             total_loss = total_loss / total_weight
         
         return total_loss
+
     
-    
-    
-    
+    def generate(self, idx_seq, t_seq=None):
 
-# List of per-level sequence & Timestamps to form an object for GAT. 
-# An instance where K = 2, L = 3 would have time-stamps 
-# [[1,2,3,4], [2,4], [4]] -- time-stamp will be used for level-agnostic relative position encoding
-# to flatten the sequences in a list object, order them first via time-stamp, then according to level
+        if t_seq is None: 
+            t_seq = self.seqflat._generate_default_timestamps(idx_seq)
 
+        input_idx, input_levels, input_timestamps = self.seqflat(idx_seq, t_seq)
+        
+        B, S = input_idx.shape
+        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
 
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l) 
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[level_mask] = level_embed
 
+        x = norm(x)
+        x0 = x
+        v1 = None
 
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
+        x = norm(x)
+        
+        l_nexts, t_nexts = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
+        
+        next_tokens = []
+        next_levels = []
+        next_timestamps = []
+        
+        for b in range(B):
+            l_next = l_nexts[b]
+            t_next = t_nexts[b]
+            
+            logits = self.lm_heads[l_next](x[b, -1:])
+            logits = 30 * torch.tanh(logits / 30).float()
+            next_token = torch.argmax(logits, dim=-1)
+            
+            next_tokens.append(next_token)
+            next_levels.append(l_next)
+            next_timestamps.append(t_next)
+            
+            idx_seq[b][l_next] = torch.cat([idx_seq[b][l_next], next_token])
+            if t_seq is not None:
+                t_seq[b][l_next] = torch.cat([t_seq[b][l_next], torch.tensor([t_next], device=t_seq.device)])
+        
+        return idx_seq, t_seq
