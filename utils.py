@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import List, Optional, Union
 import torch
 
 
@@ -161,5 +163,159 @@ def update_idx_seq(idx_seq, t_seq, next_token, next_level, next_timestamp):
             t_seq[next_level] = torch.cat([t_seq[next_level], torch.tensor([next_timestamp])])
 
     return idx_seq, t_seq
+
+# --------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Put multiple samples into a single tensor with sample idx, useful for training
+# --------------------------------------------------------------------------------------------------------------------------
+
+@dataclass
+class BatchedHierarchicalData:
+    """
+    Flattened representation of batched hierarchical sequences.
+    All data is stored as flat tensors with metadata for reconstruction.
+    """
+    # Flattened tensors - all samples concatenated
+    tokens: torch.Tensor          # Shape: [total_tokens_across_batch]
+    levels: torch.Tensor          # Shape: [total_tokens_across_batch] 
+    timestamps: torch.Tensor      # Shape: [total_tokens_across_batch]
+    
+    # Metadata for reconstruction
+    batch_boundaries: torch.Tensor  # Shape: [batch_size + 1], cumulative token counts
+    batch_size: int
+    K: int  # Abstraction factor
+    L: int  # Number of levels
+    
+    @classmethod
+    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int):
+        """
+        Create from list of hierarchical samples.
+        samples_data: List of (token_sequences, timestamp_sequences) tuples
+        Each token_sequences is a list of L token lists
+        """
+        batch_tokens = []
+        batch_levels = []
+        batch_timestamps = []
+        boundaries = [0]
+        
+        for token_seqs, timestamp_seqs in samples_data:
+            # Process single sample
+            tokens, levels, timestamps = cls._flatten_single_sample(
+                token_seqs, timestamp_seqs, K, L
+            )
+            
+            batch_tokens.append(tokens)
+            batch_levels.append(levels)
+            batch_timestamps.append(timestamps)
+            boundaries.append(boundaries[-1] + len(tokens))
+        
+        return cls(
+            tokens=torch.cat(batch_tokens),
+            levels=torch.cat(batch_levels),
+            timestamps=torch.cat(batch_timestamps),
+            batch_boundaries=torch.tensor(boundaries),
+            batch_size=len(samples_data),
+            K=K,
+            L=L
+        )
+    
+    @staticmethod
+    def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
+        """Flatten a single hierarchical sample by timestamp ordering."""
+        # Generate default timestamps if None
+        if timestamp_sequences is None:
+            timestamp_sequences = []
+            for level in range(L):
+                tokens = token_sequences[level]
+                if torch.is_tensor(tokens):
+                    seq_len = tokens.size(0)
+                    tokens = tokens.tolist()
+                else:
+                    seq_len = len(tokens)
+                
+                gap = K ** level
+                timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
+        
+        # Collect all (timestamp, level, token) tuples
+        items = []
+        for level in range(L):
+            tokens = token_sequences[level]
+            timestamps = timestamp_sequences[level]
+            
+            if torch.is_tensor(tokens):
+                tokens = tokens.tolist()
+            
+            assert len(tokens) == len(timestamps), \
+                f"Level {level}: token count ({len(tokens)}) != timestamp count ({len(timestamps)})"
+            
+            for token, timestamp in zip(tokens, timestamps):
+                items.append((timestamp, level, token))
+        
+        # Sort by timestamp, then by level
+        items.sort(key=lambda x: (x[0], x[1]))
+        
+        # Extract sorted sequences
+        sorted_tokens = [item[2] for item in items]
+        sorted_levels = [item[1] for item in items]
+        sorted_timestamps = [item[0] for item in items]
+        
+        return (
+            torch.tensor(sorted_tokens, dtype=torch.long),
+            torch.tensor(sorted_levels, dtype=torch.long), 
+            torch.tensor(sorted_timestamps, dtype=torch.long)
+        )
+    
+    def get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Get a single sample by index."""
+        start = self.batch_boundaries[idx]
+        end = self.batch_boundaries[idx + 1]
+        
+        return (
+            self.tokens[start:end],
+            self.levels[start:end], 
+            self.timestamps[start:end]
+        )
+    
+    def to(self, device):
+        """Move all tensors to device."""
+        return BatchedHierarchicalData(
+            tokens=self.tokens.to(device),
+            levels=self.levels.to(device),
+            timestamps=self.timestamps.to(device),
+            batch_boundaries=self.batch_boundaries.to(device),
+            batch_size=self.batch_size,
+            K=self.K,
+            L=self.L
+        )
+    
+    def __len__(self):
+        return self.batch_size
+    
+    def get_max_seq_len(self) -> int:
+        """Get the length of the longest sequence in the batch."""
+        seq_lens = self.batch_boundaries[1:] - self.batch_boundaries[:-1]
+        return seq_lens.max().item()
+    
+    def get_next_token_info(self, sample_idx: int):
+        """Get next token timestamp and level for a given sample."""
+        tokens, levels, timestamps = self.get_sample(sample_idx)
+        
+        if len(timestamps) == 0:
+            return 1, 0  # Start with timestamp 1, level 0
+            
+        curr_t = timestamps[-1].item()
+        curr_l = levels[-1].item()
+        
+        # Check if we should generate next level token
+        if curr_t % (self.K ** (curr_l + 1)) == 0:
+            next_t = curr_t
+            next_l = curr_l + 1
+        else:
+            next_t = curr_t + 1
+            next_l = 0
+            
+        return next_t, next_l
 
 # --------------------------------------------------------------------------------------------------------------------------

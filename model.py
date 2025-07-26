@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
-from utils import SeqFlat, get_next_token_level
+from utils import SeqFlat, get_next_token_level, update_idx_seq
 
 
 # GPT 
@@ -310,7 +310,7 @@ class GAT(nn.Module):
         x = norm(x)
         
         # Batch-size 1 case
-        l_nexts, t_nexts = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
+        l_next, t_next = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
         logits = self.lm_heads[l_next](x[0, -1:])
         logits = 30 * torch.tanh(logits / 30).float()
         next_token = torch.argmax(logits, dim=-1).squeeze(0)
