@@ -58,6 +58,7 @@ class SeqFlat:
                 token_seqs_list.append(tokens)
             
             idx, levels, timestamps = self._process_single_sample(token_seqs_list, timestamp_sequences)
+            # return idx, levels, timestamps
             return idx.unsqueeze(0), levels.unsqueeze(0), timestamps.unsqueeze(0)
     
     def _process_single_sample(self, token_sequences, timestamp_sequences):
@@ -116,41 +117,49 @@ class SeqFlat:
 # --------------------------------------------------------------------------------------------------------------------------
 
 def get_next_token_level(levels, timestamps, K, L):
-
-    B = levels.shape[0]
-    next_levels = torch.zeros(B, dtype=torch.long, device=levels.device)
-    next_timestamps = torch.zeros(B, dtype=torch.long, device=timestamps.device)
     
-    for b in range(B):
-        batch_levels = levels[b]
-        batch_timestamps = timestamps[b]
-        
-        max_timestamp = batch_timestamps.max().item()
-        
-        current_level = batch_levels[batch_timestamps == max_timestamp][0].item() 
+    max_timestamp = timestamps.max().item()
+    current_level = levels[timestamps == max_timestamp][0].item()
 
-        if current_level == L - 1:
-            next_levels[b] = 0
-            next_timestamps[b] = max_timestamp + 1
-            continue
-        
-        consecutive_count = 0
-        
-        for i in range(K):
-            target_timestamp = max_timestamp - K + 1 + i
-            mask = (batch_timestamps == target_timestamp) & (batch_levels == current_level)
-            if mask.any():
-                consecutive_count += 1
-            else:
-                break
-        
-        if consecutive_count == K:
-            next_levels[b] = current_level + 1
-            next_timestamps[b] = max_timestamp
+    if current_level == L - 1:
+        next_level[0] = 0
+        next_timestamp[0] = max_timestamp + 1
+        return next_level, next_timestamp
+    
+    consecutive_count = 0
+    for i in range(K):
+        target_timestamp = max_timestamp - K + 1 + i
+        mask = (timestamps == target_timestamp) & (levels == current_level)
+        if mask.any():
+            consecutive_count += 1
         else:
-            next_levels[b] = current_level
-            next_timestamps[b] = max_timestamp + 1
+            break
     
-    return next_levels, next_timestamps
+    if consecutive_count == K:
+        next_level = current_level + 1
+        next_timestamp = max_timestamp
+    else:
+        next_level = current_level
+        next_timestamp = max_timestamp + 1
+
+    return next_level, next_timestamp
+
+
+def update_idx_seq(idx_seq, t_seq, next_token, next_level, next_timestamp):
+        
+    assert len(idx_seq) > next_level, "idx_seq is not long enough, current level is {}, but idx_seq has only {} levels".format(next_level, len(idx_seq))
+    
+    if isinstance(idx_seq[next_level], list): 
+        idx_seq[next_level].append(next_token.item() if isinstance(next_token, torch.Tensor) else next_token)
+    else: 
+        idx_seq[next_level] = torch.cat([idx_seq[next_level], next_token if isinstance(next_token, torch.Tensor) else torch.tensor([next_token])])
+
+    if t_seq is not None: 
+        if isinstance(t_seq[next_level], list): 
+            t_seq[next_level].append(next_timestamp)
+        else: 
+            t_seq[next_level] = torch.cat([t_seq[next_level], torch.tensor([next_timestamp])])
+
+    return idx_seq, t_seq
 
 # --------------------------------------------------------------------------------------------------------------------------

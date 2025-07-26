@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
-from utils import SeqFlat
+from utils import SeqFlat, get_next_token_level
 
 
 # GPT 
@@ -214,6 +214,7 @@ class GAT(nn.Module):
         super().__init__()
         self.num_layers = config.n_layer
         self.L = config.L
+        self.K = config.K
         self.seqflat = SeqFlat(config.K, config.L)
         self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
         self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
@@ -242,10 +243,8 @@ class GAT(nn.Module):
             causal_mask = q_idx >= kv_idx
             return causal_mask
 
-        S = input_idx.shape[1] 
-        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
         B, S = input_idx.shape
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)        
         x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
 
         for l in range(self.L): # per-level embedding
@@ -284,12 +283,14 @@ class GAT(nn.Module):
     
     def generate(self, idx_seq, t_seq=None):
 
-        if t_seq is None: 
-            t_seq = self.seqflat._generate_default_timestamps(idx_seq)
-
         input_idx, input_levels, input_timestamps = self.seqflat(idx_seq, t_seq)
         
+        def causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            return causal_mask
+
         B, S = input_idx.shape
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
         x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
 
         for l in range(self.L): # per-level embedding
@@ -308,26 +309,11 @@ class GAT(nn.Module):
 
         x = norm(x)
         
+        # Batch-size 1 case
         l_nexts, t_nexts = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
-        
-        next_tokens = []
-        next_levels = []
-        next_timestamps = []
-        
-        for b in range(B):
-            l_next = l_nexts[b]
-            t_next = t_nexts[b]
-            
-            logits = self.lm_heads[l_next](x[b, -1:])
-            logits = 30 * torch.tanh(logits / 30).float()
-            next_token = torch.argmax(logits, dim=-1)
-            
-            next_tokens.append(next_token)
-            next_levels.append(l_next)
-            next_timestamps.append(t_next)
-            
-            idx_seq[b][l_next] = torch.cat([idx_seq[b][l_next], next_token])
-            if t_seq is not None:
-                t_seq[b][l_next] = torch.cat([t_seq[b][l_next], torch.tensor([t_next], device=t_seq.device)])
-        
+        logits = self.lm_heads[l_next](x[0, -1:])
+        logits = 30 * torch.tanh(logits / 30).float()
+        next_token = torch.argmax(logits, dim=-1).squeeze(0)
+
+        idx_seq, t_seq = update_idx_seq(idx_seq, t_seq, next_token, l_next, t_next)
         return idx_seq, t_seq
