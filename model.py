@@ -215,7 +215,6 @@ class GAT(nn.Module):
         self.num_layers = config.n_layer
         self.L = config.L
         self.K = config.K
-        self.seqflat = SeqFlat(config.K, config.L)
         self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
         self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
         for lm_head in self.lm_heads:

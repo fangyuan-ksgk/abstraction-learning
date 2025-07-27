@@ -7,30 +7,23 @@ import torch
 # --------------------------------------------------------------------------------------------------------------------------
 
 def get_next_token_level(levels, timestamps, K, L):
-    
-    max_timestamp = timestamps.max().item()
-    current_level = levels[timestamps == max_timestamp][0].item()
+
+    current_level = levels[-1]
+    current_time = timestamps[-1]
 
     if current_level == L - 1:
-        next_level = 0
-        next_timestamp = max_timestamp + 1
+        next_level = torch.tensor(0, dtype=levels.dtype, device=levels.device)
+        next_timestamp = current_time + 1
         return next_level, next_timestamp
-    
-    consecutive_count = 0
-    for i in range(K):
-        target_timestamp = max_timestamp - K + 1 + i
-        mask = (timestamps == target_timestamp) & (levels == current_level)
-        if mask.any():
-            consecutive_count += 1
-        else:
-            break
-    
-    if consecutive_count == K:
+
+    mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
+    do_plan = all(levels[mask] == current_level)
+    if do_plan: 
         next_level = current_level + 1
-        next_timestamp = max_timestamp
-    else:
-        next_level = current_level
-        next_timestamp = max_timestamp + 1
+        next_timestamp = current_time
+    else: 
+        next_level = torch.tensor(0, dtype=levels.dtype, device=levels.device)
+        next_timestamp = current_time + 1
 
     return next_level, next_timestamp
 
@@ -40,7 +33,7 @@ def create_loss_mask(sample_idx: torch.Tensor) -> torch.Tensor:
     sample_starts[0] = True 
     sample_starts[1:] = sample_idx[1:] != sample_idx[:-1]
     return ~sample_starts
-    
+
 # --------------------------------------------------------------------------------------------------------------------------
 
 
