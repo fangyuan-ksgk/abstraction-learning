@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
-from utils import SeqFlat, get_next_token_level, update_idx_seq, BatchedHierarchicalData, create_loss_mask
+from utils import get_next_token_level, BatchedHierSeq, create_loss_mask
 
 
 # GPT 
@@ -231,7 +231,7 @@ class GAT(nn.Module):
         self._compile = config._compile
         self.level_weights = config.level_weights
 
-    def forward(self, batch_data: BatchedHierarchicalData):
+    def forward(self, batch_data: BatchedHierSeq):
 
         input_idx = batch_data.tokens[:-1]
         target_idx = batch_data.tokens[1:]
@@ -286,7 +286,7 @@ class GAT(nn.Module):
         return total_loss / total_weight
 
     
-    def generate(self, batch_data: BatchedHierarchicalData):
+    def generate(self, batch_data: BatchedHierSeq):
 
         input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
         sample_idx = batch_data.sample_idx
