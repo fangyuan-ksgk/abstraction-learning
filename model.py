@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
-from utils import SeqFlat, get_next_token_level, update_idx_seq
+from utils import SeqFlat, get_next_token_level, update_idx_seq, BatchedHierarchicalData, create_loss_mask
 
 
 # GPT 
@@ -245,7 +245,6 @@ class GAT(nn.Module):
             sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
             return causal_mask & sample_mask
 
-        self = gat
         S = input_idx.shape[0]
         block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 

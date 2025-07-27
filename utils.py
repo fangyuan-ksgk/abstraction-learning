@@ -306,3 +306,10 @@ class BatchedHierarchicalData:
         return next_t, next_l
 
 # --------------------------------------------------------------------------------------------------------------------------
+
+
+def create_loss_mask(sample_idx: torch.Tensor) -> torch.Tensor:
+    sample_starts = torch.zeros_like(sample_idx, dtype=torch.bool)
+    sample_starts[0] = True 
+    sample_starts[1:] = sample_idx[1:] != sample_idx[:-1]
+    return ~sample_starts
