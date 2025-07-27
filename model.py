@@ -231,28 +231,33 @@ class GAT(nn.Module):
         self._compile = config._compile
         self.level_weights = config.level_weights
 
-    def forward(self, idx_seq, t_seq=None):
-    
-        idx, levels, timestamps = self.seqflat(idx_seq, t_seq)
-        input_idx = idx[:, :-1]      
-        target_idx = idx[:, 1:]      
-        input_levels = levels[:, :-1]    
-        target_levels = levels[:, 1:]    
+    def forward(self, batch_data: BatchedHierarchicalData):
 
-        def causal_mask(b, h, q_idx, kv_idx):
+        input_idx = batch_data.tokens[:-1]
+        target_idx = batch_data.tokens[1:]
+        input_levels = batch_data.levels[:-1]
+        target_levels = batch_data.levels[1:]
+
+        sample_idx = batch_data.sample_idx
+
+        def sample_causal_mask(b, h, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
-            return causal_mask
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
 
-        B, S = input_idx.shape
-        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)        
-        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
+        self = gat
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
 
         for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l) 
+            level_mask = (input_levels == l)
             if level_mask.any():  
                 level_tokens = input_idx[level_mask]  
                 level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[level_mask] = level_embed
+                x[:,level_mask] = level_embed
 
         x = norm(x)
         x0 = x
@@ -262,23 +267,24 @@ class GAT(nn.Module):
             x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
         x = norm(x)
-        
+
         total_loss = 0.0 
         total_weight = 0.0
-        
+        loss_mask = create_loss_mask(sample_idx)[1:]
+
         for l in range(self.L): # per-level projection
-            target_level_mask = (target_levels == l) 
+            target_level_mask = (target_levels == l) & loss_mask
             if target_level_mask.any():  
-                level_logits = self.lm_heads[l](x[target_level_mask])  
+                level_logits = self.lm_heads[l](x[:, target_level_mask])
                 level_logits = 30 * torch.tanh(level_logits / 30).float()                
-                level_loss = F.cross_entropy(level_logits, target_idx[target_level_mask])
+                level_loss = F.cross_entropy(
+                    level_logits.view(-1, level_logits.size(-1)),
+                    target_idx[target_level_mask]
+                )
                 total_loss += self.level_weights[l] * level_loss
                 total_weight += self.level_weights[l]
-        
-        if total_weight > 0:
-            total_loss = total_loss / total_weight
-        
-        return total_loss
+
+        return total_loss / total_weight
 
     
     def generate(self, idx_seq, t_seq=None):

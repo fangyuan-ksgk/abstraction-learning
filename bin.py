@@ -460,3 +460,133 @@ class GAT(nn.Module):
             
 # --------------------------------------------------------------------------------------------------------------------------
 
+# Ver. Jul 27.
+
+@dataclass
+class GATConfig:
+    vocab_size : int = 50304
+    n_layer : int = 12
+    n_head : int = 6
+    n_embd : int = 768
+    flex_kernel_options: Optional[dict] = None
+    eoc_idx : int = 5826319 
+    eos_idx : int = 5826320
+    K: int = 4  # abstraction ratio
+    L: int = 3  # number of abstraction levels
+    vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
+    device: str = "cuda"
+    _compile: bool = True
+    level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
+
+
+class GAT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.num_layers = config.n_layer
+        self.L = config.L
+        self.K = config.K
+        self.seqflat = SeqFlat(config.K, config.L)
+        self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
+        self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
+        for lm_head in self.lm_heads:
+            lm_head.weight.data.zero_()
+        
+        self.transformer = nn.ModuleDict(dict(
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        ))
+
+        self.level_embeddings = nn.Parameter(torch.randn(config.L, config.n_embd))
+
+        self.device = config.device
+        self._compile = config._compile
+        self.level_weights = config.level_weights
+
+    def forward(self, idx_seq, t_seq=None):
+    
+        idx, levels, timestamps = self.seqflat(idx_seq, t_seq)
+        input_idx = idx[:, :-1]      
+        target_idx = idx[:, 1:]      
+        input_levels = levels[:, :-1]    
+        target_levels = levels[:, 1:]    
+
+        def causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            return causal_mask
+
+        B, S = input_idx.shape
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)        
+        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l) 
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[level_mask] = level_embed
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+        
+        total_loss = 0.0 
+        total_weight = 0.0
+        
+        for l in range(self.L): # per-level projection
+            target_level_mask = (target_levels == l) 
+            if target_level_mask.any():  
+                level_logits = self.lm_heads[l](x[target_level_mask])  
+                level_logits = 30 * torch.tanh(level_logits / 30).float()                
+                level_loss = F.cross_entropy(level_logits, target_idx[target_level_mask])
+                total_loss += self.level_weights[l] * level_loss
+                total_weight += self.level_weights[l]
+        
+        if total_weight > 0:
+            total_loss = total_loss / total_weight
+        
+        return total_loss
+
+    
+    def generate(self, idx_seq, t_seq=None):
+
+        input_idx, input_levels, input_timestamps = self.seqflat(idx_seq, t_seq)
+        
+        def causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            return causal_mask
+
+        B, S = input_idx.shape
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l) 
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[level_mask] = level_embed
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+        
+        # Batch-size 1 case
+        l_next, t_next = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
+        logits = self.lm_heads[l_next](x[0, -1:])
+        logits = 30 * torch.tanh(logits / 30).float()
+        next_token = torch.argmax(logits, dim=-1).squeeze(0)
+
+        idx_seq, t_seq = update_idx_seq(idx_seq, t_seq, next_token, l_next, t_next)
+        return idx_seq, t_seq
+
+# --------------------------------------------------------------------------------------------------------------------------

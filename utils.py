@@ -168,40 +168,31 @@ def update_idx_seq(idx_seq, t_seq, next_token, next_level, next_timestamp):
 
 
 
-# Put multiple samples into a single tensor with sample idx, useful for training
+# Batch ver. of SeqFlat, putting multiple samples into single tensor (without batch dimension), avoids padding
 # --------------------------------------------------------------------------------------------------------------------------
 
 @dataclass
 class BatchedHierarchicalData:
-    """
-    Flattened representation of batched hierarchical sequences.
-    All data is stored as flat tensors with metadata for reconstruction.
-    """
-    # Flattened tensors - all samples concatenated
-    tokens: torch.Tensor          # Shape: [total_tokens_across_batch]
-    levels: torch.Tensor          # Shape: [total_tokens_across_batch] 
-    timestamps: torch.Tensor      # Shape: [total_tokens_across_batch]
-    
-    # Metadata for reconstruction
-    batch_boundaries: torch.Tensor  # Shape: [batch_size + 1], cumulative token counts
+
+    tokens: torch.Tensor          
+    levels: torch.Tensor          
+    timestamps: torch.Tensor      
+
+    sample_idx: torch.Tensor       
     batch_size: int
-    K: int  # Abstraction factor
-    L: int  # Number of levels
+    K: int  
+    L: int 
     
     @classmethod
     def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int):
-        """
-        Create from list of hierarchical samples.
-        samples_data: List of (token_sequences, timestamp_sequences) tuples
-        Each token_sequences is a list of L token lists
-        """
+
         batch_tokens = []
         batch_levels = []
         batch_timestamps = []
-        boundaries = [0]
+        batch_sample_idx = []
         
         for token_seqs, timestamp_seqs in samples_data:
-            # Process single sample
+
             tokens, levels, timestamps = cls._flatten_single_sample(
                 token_seqs, timestamp_seqs, K, L
             )
@@ -209,13 +200,14 @@ class BatchedHierarchicalData:
             batch_tokens.append(tokens)
             batch_levels.append(levels)
             batch_timestamps.append(timestamps)
-            boundaries.append(boundaries[-1] + len(tokens))
-        
+            sample_idx = batch_sample_idx[-1] + 1 if batch_sample_idx else 0
+            batch_sample_idx += [sample_idx] * len(tokens)
+
         return cls(
             tokens=torch.cat(batch_tokens),
             levels=torch.cat(batch_levels),
             timestamps=torch.cat(batch_timestamps),
-            batch_boundaries=torch.tensor(boundaries),
+            sample_idx=torch.tensor(batch_sample_idx),
             batch_size=len(samples_data),
             K=K,
             L=L
@@ -269,13 +261,13 @@ class BatchedHierarchicalData:
     
     def get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get a single sample by index."""
-        start = self.batch_boundaries[idx]
-        end = self.batch_boundaries[idx + 1]
+        
+        mask = (self.sample_idx == idx)
         
         return (
-            self.tokens[start:end],
-            self.levels[start:end], 
-            self.timestamps[start:end]
+            self.tokens[mask],
+            self.levels[mask], 
+            self.timestamps[mask]
         )
     
     def to(self, device):
@@ -284,7 +276,7 @@ class BatchedHierarchicalData:
             tokens=self.tokens.to(device),
             levels=self.levels.to(device),
             timestamps=self.timestamps.to(device),
-            batch_boundaries=self.batch_boundaries.to(device),
+            sample_idx=self.sample_idx.to(device),
             batch_size=self.batch_size,
             K=self.K,
             L=self.L
@@ -292,11 +284,6 @@ class BatchedHierarchicalData:
     
     def __len__(self):
         return self.batch_size
-    
-    def get_max_seq_len(self) -> int:
-        """Get the length of the longest sequence in the batch."""
-        seq_lens = self.batch_boundaries[1:] - self.batch_boundaries[:-1]
-        return seq_lens.max().item()
     
     def get_next_token_info(self, sample_idx: int):
         """Get next token timestamp and level for a given sample."""
