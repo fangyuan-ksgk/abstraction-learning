@@ -245,10 +245,8 @@ class BatchedHierarchicalData:
             for token, timestamp in zip(tokens, timestamps):
                 items.append((timestamp, level, token))
         
-        # Sort by timestamp, then by level
-        items.sort(key=lambda x: (x[0], x[1]))
+        items.sort(key=lambda x: (x[0], x[1])) # Sort by timestamp, then by level
         
-        # Extract sorted sequences
         sorted_tokens = [item[2] for item in items]
         sorted_levels = [item[1] for item in items]
         sorted_timestamps = [item[0] for item in items]
@@ -267,7 +265,8 @@ class BatchedHierarchicalData:
         return (
             self.tokens[mask],
             self.levels[mask], 
-            self.timestamps[mask]
+            self.timestamps[mask],
+            mask
         )
     
     def to(self, device):
@@ -287,23 +286,54 @@ class BatchedHierarchicalData:
     
     def get_next_token_info(self, sample_idx: int):
         """Get next token timestamp and level for a given sample."""
-        tokens, levels, timestamps = self.get_sample(sample_idx)
+        tokens, levels, timestamps, mask = self.get_sample(sample_idx)
+        l_next, t_next = get_next_token_level(levels, timestamps, self.K, self.L)
+        return l_next, t_next, mask
+
+    def insert_next_token(self, sample_idx: int, next_token: torch.Tensor, next_level: int, next_timestamp: int):
+        """
+        Insert next token for a specific sample at the end of that sample's sequence (in-place)
+        """
+        # Find the last occurrence of this sample_idx
+        sample_positions = torch.where(self.sample_idx == sample_idx)[0]
+        if len(sample_positions) == 0:
+            raise ValueError(f"Sample {sample_idx} not found in batch")
         
-        if len(timestamps) == 0:
-            return 1, 0  # Start with timestamp 1, level 0
-            
-        curr_t = timestamps[-1].item()
-        curr_l = levels[-1].item()
+        last_pos = sample_positions[-1].item()
         
-        # Check if we should generate next level token
-        if curr_t % (self.K ** (curr_l + 1)) == 0:
-            next_t = curr_t
-            next_l = curr_l + 1
-        else:
-            next_t = curr_t + 1
-            next_l = 0
-            
-        return next_t, next_l
+        # Insert after the last position of this sample
+        insert_pos = last_pos + 1
+        
+        # Convert to tensor if needed
+        if not torch.is_tensor(next_token):
+            next_token = torch.tensor([next_token])
+        elif next_token.dim() == 0:
+            next_token = next_token.unsqueeze(0)
+        
+        # Insert the new token in-place
+        self.tokens = torch.cat([
+            self.tokens[:insert_pos], 
+            next_token,
+            self.tokens[insert_pos:]
+        ])
+        
+        self.levels = torch.cat([
+            self.levels[:insert_pos],
+            torch.tensor([next_level]),
+            self.levels[insert_pos:]
+        ])
+        
+        self.timestamps = torch.cat([
+            self.timestamps[:insert_pos],
+            torch.tensor([next_timestamp]),
+            self.timestamps[insert_pos:]
+        ])
+        
+        self.sample_idx = torch.cat([
+            self.sample_idx[:insert_pos],
+            torch.tensor([sample_idx]),
+            self.sample_idx[insert_pos:]
+        ])        
 
 # --------------------------------------------------------------------------------------------------------------------------
 

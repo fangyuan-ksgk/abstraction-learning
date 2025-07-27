@@ -286,24 +286,27 @@ class GAT(nn.Module):
         return total_loss / total_weight
 
     
-    def generate(self, idx_seq, t_seq=None):
+    def generate(self, batch_data: BatchedHierarchicalData):
 
-        input_idx, input_levels, input_timestamps = self.seqflat(idx_seq, t_seq)
-        
-        def causal_mask(b, h, q_idx, kv_idx):
+        input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
+        sample_idx = batch_data.sample_idx
+
+        def sample_causal_mask(b, h, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
-            return causal_mask
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
 
-        B, S = input_idx.shape
-        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-        x = torch.zeros(B, S, self.level_embeddings.shape[1], device=self.device)
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
 
         for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l) 
+            level_mask = (input_levels == l)
             if level_mask.any():  
                 level_tokens = input_idx[level_mask]  
                 level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[level_mask] = level_embed
+                x[:,level_mask] = level_embed
 
         x = norm(x)
         x0 = x
@@ -313,12 +316,18 @@ class GAT(nn.Module):
             x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
         x = norm(x)
-        
-        # Batch-size 1 case
-        l_next, t_next = get_next_token_level(input_levels, input_timestamps, self.K, self.L)
-        logits = self.lm_heads[l_next](x[0, -1:])
-        logits = 30 * torch.tanh(logits / 30).float()
-        next_token = torch.argmax(logits, dim=-1).squeeze(0)
 
-        idx_seq, t_seq = update_idx_seq(idx_seq, t_seq, next_token, l_next, t_next)
-        return idx_seq, t_seq
+        for b in range(batch_data.batch_size):
+
+            mask = sample_idx == b
+            l_next, t_next = get_next_token_level(input_levels[mask], input_timestamps[mask], self.K, self.L)
+
+            logits = self.lm_heads[l_next](x[0, mask][-1])
+            logits = 30 * torch.tanh(logits / 30).float()
+            next_token = torch.argmax(logits, dim=-1)
+
+            batch_data.insert_next_token(b, next_token, l_next, t_next)
+
+        return batch_data
+
+    
