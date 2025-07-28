@@ -187,9 +187,8 @@ class GPT(nn.Module):
 
 # (I). Attention pattern: Hiearchical Causality 
 # (II). GAT: GPT with level-wise WTE & LM head
-
-
-# rocky implementation, need re-construction
+# GAT for language modeling
+# --------------------------------------------------------------------------------------------------------------------------
 
 @dataclass
 class GATConfig:
@@ -329,4 +328,181 @@ class GAT(nn.Module):
 
         return batch_data
 
+# --------------------------------------------------------------------------------------------------------------------------
+
+
+# Abstract Policy Transformer (APT) for Snake Game and more
+# --------------------------------------------------------------------------------------------------------------------------
+
+@dataclass
+class APTConfig:
+    n_layer : int = 4
+    n_head : int = 2
+    n_embd : int = 64
+    flex_kernel_options: Optional[dict] = None
+    K: int = 4  # abstraction ratio
+    L: int = 2  # number of abstraction levels
+    vocab_size_list: list = field(default_factory=lambda: [64, 32]) # vocab for abstractions
+    device: str = "cuda"
+    _compile: bool = True
+    level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
+
+
+# Abstract policy transformer (APT)
+class APT(nn.Module):
+
+    def __init__(
+            self, 
+            config,
+            state_encoder,
+            state_decoder,
+            action_encoder,
+            action_decoder,
+        ):
+        super().__init__()
+        self.num_layers = config.n_layer
+        self.L = config.L
+        self.K = config.K
+
+        self.state_encoder = state_encoder
+        self.state_decoder = state_decoder
+        self.action_encoder = action_encoder
+        self.action_decoder = action_decoder
+        
+        # abstract token encoder & decoder
+        self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
+        self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
+        for lm_head in self.lm_heads:
+            lm_head.weight.data.zero_()
+        
+        self.transformer = nn.ModuleDict(dict(
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        ))
+
+        self.level_embeddings = nn.Parameter(torch.randn(config.L-1, config.n_embd))
+
+        self.device = config.device
+        self._compile = config._compile
+        self.level_weights = config.level_weights
+
+
+    # Issue: state & action are not 'indexed' (action usually is but state isn't), we need to predict both action & next-state
+    # TBD: 
+    # - 1. Add Markov execution mask (0-th level token has window of 1)
+    # - 2. Add raw State & Action tensor as input (for loss computation) 
+    def forward(self, batch_data: BatchedHierSeq, ext_embds: list):
+
+        input_idx = batch_data.tokens[:-1]
+        target_idx = batch_data.tokens[1:]
+        input_levels = batch_data.levels[:-1]
+        target_levels = batch_data.levels[1:]
+
+        sample_idx = batch_data.sample_idx
+
+        # (TBD) Add Markov execution mask (0-th level token has window of 1)
+        def sample_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
+
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l)
+
+            if level_mask.any():  
+                if l == 0: 
+                    x[:, level_mask] = ext_embds # place-holder tokens embedding replacement
+                else: 
+                    level_tokens = input_idx[level_mask]  
+                    level_embed = self.wtes[l-1](level_tokens) + self.level_embeddings[l-1].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                    x[:,level_mask] = level_embed
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        total_loss = 0.0 
+        total_weight = 0.0
+        loss_mask = create_loss_mask(sample_idx)[1:]
+
+        for l in range(self.L): # per-level projection
+            target_level_mask = (target_levels == l) & loss_mask
+            if target_level_mask.any():  
+                if l == 0: 
+                    # Issue #3. Passing in embedding is not sufficient, here we need the actual 'state & action'
+                    # tensor in order to compute the loss.
+                    level_loss = self.action_decoder.forward(x[:, target_level_mask], target_idx[target_level_mask])
+                else: 
+                    level_logits = self.lm_heads[l-1](x[:, target_level_mask])
+                    level_logits = 30 * torch.tanh(level_logits / 30).float()                
+                    level_loss = F.cross_entropy(
+                        level_logits.view(-1, level_logits.size(-1)),
+                        target_idx[target_level_mask]
+                    )
+                total_loss += self.level_weights[l] * level_loss
+                total_weight += self.level_weights[l]
+
+        return total_loss / total_weight
+
     
+    def generate(self, batch_data: BatchedHierSeq):
+
+        input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
+        sample_idx = batch_data.sample_idx
+
+        def sample_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
+
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l)
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[:,level_mask] = level_embed
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        for b in range(batch_data.batch_size):
+
+            mask = sample_idx == b
+            l_next, t_next = get_next_token_level(input_levels[mask], input_timestamps[mask], self.K, self.L)
+
+            logits = self.lm_heads[l_next](x[0, mask][-1])
+            logits = 30 * torch.tanh(logits / 30).float()
+            next_token = torch.argmax(logits, dim=-1)
+
+            batch_data.insert_next_token(b, next_token, l_next, t_next)
+
+        return batch_data
+
+
+
+
+
+
+
+# --------------------------------------------------------------------------------------------------------------------------
