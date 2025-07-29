@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import BOS_TOKEN_ID
-from utils import get_next_token_level, BatchedHierSeq, create_loss_mask
+from utils import get_next_token_level, BatchedHierSeq, create_loss_mask, get_ext_embds
 
 
 # GPT 
@@ -387,10 +387,86 @@ class APT(nn.Module):
 
 
     # Issue: state & action are not 'indexed' (action usually is but state isn't), we need to predict both action & next-state
-    # TBD: 
-    # - 1. Add Markov execution mask (0-th level token has window of 1)
-    # - 2. Add raw State & Action tensor as input (for loss computation) 
-    def forward(self, batch_data: BatchedHierSeq, ext_embds: list):
+    # Progress: 
+    # - (Done) Add Markov execution mask (0-th level token has window of 1)
+    # - (Done) Add raw State & Action tensor as input (for loss computation) 
+    # - (TBD) DRA using reward signal
+
+    def _get_ext_embds(self, trajectories): 
+        ext_embds = []
+        for trajectory in trajectories:
+            state_embd = self.state_encoder(trajectory[0])
+            action_embd = self.action_encoder(trajectory[1])
+            extended_embd = torch.cat([action_embd, state_embd], dim=1)
+            ext_embds.append(extended_embd)
+        return torch.cat(ext_embds, dim=0).unsqueeze(0)
+
+    def _create_hierarchical_embeddings(self, batch_data, trajectories):
+ 
+        input_levels = batch_data.levels[:-1]
+        input_idx = batch_data.tokens[:-1]
+        S = input_idx.shape[0]
+        
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
+        ext_embds = self._get_ext_embds(trajectories)
+        
+        for l in range(self.L):
+            level_mask = (input_levels == l)
+            if level_mask.any():  
+                if l == 0: 
+                    x[:, level_mask] = ext_embds  # External embeddings!
+                else: 
+                    level_tokens = input_idx[level_mask]  
+                    level_embed = (self.wtes[l-1](level_tokens) + 
+                                self.level_embeddings[l-1].unsqueeze(0))
+                    x[:, level_mask] = level_embed
+        
+        return norm(x)
+
+    def _compute_hierarchical_loss(self, hidden_states, batch_data, trajectories):
+   
+        target_levels = batch_data.levels[1:]
+        target_idx = batch_data.tokens[1:]
+        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
+        
+        total_loss = 0.0 
+        total_weight = 0.0
+        
+        for l in range(self.L):
+            target_level_mask = (target_levels == l)
+            if target_level_mask.any():
+                
+                if l == 0:  # Special handling for level 0
+                    loss_mask_l0 = loss_mask[target_level_mask]
+                    action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
+                    state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
+                    
+                    action_loss = self.action_decoder.forward(
+                        hidden_states[:, target_level_mask][0, loss_mask_l0],
+                        action_tensor[1:][loss_mask_l0]
+                    )
+                    state_loss = self.state_decoder.forward(
+                        hidden_states[:, target_level_mask][0, loss_mask_l0],
+                        state_tensor[1:][loss_mask_l0]
+                    )
+                    level_loss = action_loss + state_loss
+                    
+                else:  # Standard language modeling for other levels
+                    target_level_mask = target_level_mask & loss_mask
+                    level_logits = self.lm_heads[l-1](hidden_states[:, target_level_mask])
+                    level_logits = 30 * torch.tanh(level_logits / 30).float()                
+                    level_loss = F.cross_entropy(
+                        level_logits.view(-1, level_logits.size(-1)),
+                        target_idx[target_level_mask]
+                    )
+                    
+                total_loss += self.level_weights[l] * level_loss
+                total_weight += self.level_weights[l]
+        
+        return total_loss / total_weight
+    
+
+    def forward(self, batch_data: BatchedHierSeq, trajectories: list):
 
         input_idx = batch_data.tokens[:-1]
         target_idx = batch_data.tokens[1:]
@@ -399,15 +475,20 @@ class APT(nn.Module):
 
         sample_idx = batch_data.sample_idx
 
-        # (TBD) Add Markov execution mask (0-th level token has window of 1)
-        def sample_causal_mask(b, h, q_idx, kv_idx):
+        def markov_causal_mask(b, h, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
             sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
-            return causal_mask & sample_mask
+            
+            pos = torch.arange(len(input_levels), device=input_levels.device)
+            markov_mask = (input_levels[kv_idx] == 0) & torch.any(
+                (pos > kv_idx) & (pos < q_idx) & (input_levels == 0))
+            
+            return causal_mask & sample_mask & ~markov_mask
 
         S = input_idx.shape[0]
-        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+        block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
+        ext_embds = self._get_ext_embds(trajectories)
 
         x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
 
@@ -436,13 +517,27 @@ class APT(nn.Module):
         loss_mask = create_loss_mask(sample_idx)[1:]
 
         for l in range(self.L): # per-level projection
-            target_level_mask = (target_levels == l) & loss_mask
-            if target_level_mask.any():  
+            target_level_mask = (target_levels == l)
+            if target_level_mask.any():
+
                 if l == 0: 
-                    # Issue #3. Passing in embedding is not sufficient, here we need the actual 'state & action'
-                    # tensor in order to compute the loss.
-                    level_loss = self.action_decoder.forward(x[:, target_level_mask], target_idx[target_level_mask])
+                    loss_mask_l0 = loss_mask[target_level_mask]
+
+                    action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
+                    state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
+
+                    action_select_loss = self.action_decoder.forward(
+                        x[:, target_level_mask][0, loss_mask_l0],
+                        action_tensor[1:][loss_mask_l0]
+                    )
+                    state_predict_loss = self.state_decoder.forward(
+                        x[:, target_level_mask][0, loss_mask_l0],
+                        state_tensor[1:][loss_mask_l0]
+                    )
+                    
+                    level_loss = action_select_loss + state_predict_loss
                 else: 
+                    target_level_mask = target_level_mask & loss_mask
                     level_logits = self.lm_heads[l-1](x[:, target_level_mask])
                     level_logits = 30 * torch.tanh(level_logits / 30).float()                
                     level_loss = F.cross_entropy(
