@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-from constant import BOS_TOKEN_ID
-from utils import get_next_token_level, BatchedHierSeq, create_loss_mask, get_ext_embds
+from constant import PLACE_HOLDER_TOK
+from utils import get_next_token_level, BatchedHierSeq, create_loss_mask
 
 
 # GPT 
@@ -200,7 +200,7 @@ class GATConfig:
     eoc_idx : int = 5826319 
     eos_idx : int = 5826320
     K: int = 4  # abstraction ratio
-    L: int = 3  # number of abstraction levels
+    L: int = 4  # total # of levels (including 0-th level)
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
     device: str = "cuda"
     _compile: bool = True
@@ -341,7 +341,7 @@ class APTConfig:
     n_embd : int = 64
     flex_kernel_options: Optional[dict] = None
     K: int = 4  # abstraction ratio
-    L: int = 2  # number of abstraction levels
+    L: int = 3  # total # of levels (including 0-th level)
     vocab_size_list: list = field(default_factory=lambda: [64, 32]) # vocab for abstractions
     device: str = "cuda"
     _compile: bool = True
@@ -384,13 +384,76 @@ class APT(nn.Module):
         self.device = config.device
         self._compile = config._compile
         self.level_weights = config.level_weights
+    
 
+    def forward(self, batch_data: BatchedHierSeq, trajectories: list):
 
-    # Issue: state & action are not 'indexed' (action usually is but state isn't), we need to predict both action & next-state
-    # Progress: 
-    # - (Done) Add Markov execution mask (0-th level token has window of 1)
-    # - (Done) Add raw State & Action tensor as input (for loss computation) 
-    # - (TBD) DRA using reward signal
+        input_levels = batch_data.levels[:-1]
+        sample_idx = batch_data.sample_idx
+
+        def markov_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            pos = torch.arange(len(input_levels), device=input_levels.device)
+            markov_mask = (input_levels[kv_idx] == 0) & torch.any(
+                (pos > kv_idx) & (pos < q_idx) & (input_levels == 0))
+            return causal_mask & sample_mask & ~markov_mask
+
+        S = input_levels.shape[0]
+        block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self._create_hierarchical_embeddings(batch_data, trajectories)
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        loss = self._compute_hierarchical_loss(x, batch_data, trajectories)
+
+        return loss
+
+    
+    def generate(self, batch_data: BatchedHierSeq):
+        """
+        Note: trajectories w/o reward is newly generated
+        """
+
+        idx = batch_data.tokens
+        levels = batch_data.levels
+        timestamps = batch_data.timestamps
+        sample_idx = batch_data.sample_idx
+
+        def markov_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            pos = torch.arange(len(levels), device=levels.device)
+            markov_mask = (levels[kv_idx] == 0) & torch.any(
+                (pos > kv_idx) & (pos < q_idx) & (levels == 0))
+            return causal_mask & sample_mask & ~markov_mask
+
+        S = levels.shape[0]
+        block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self._create_hierarchical_embeddings(batch_data, trajectories, do_slice=False)
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        batch_data, trajectories = self._hiearchical_generate(batch_data, trajectories)
+
+        return batch_data, trajectories 
+
 
     def _get_ext_embds(self, trajectories): 
         ext_embds = []
@@ -401,116 +464,49 @@ class APT(nn.Module):
             ext_embds.append(extended_embd)
         return torch.cat(ext_embds, dim=0).unsqueeze(0)
 
-    def _create_hierarchical_embeddings(self, batch_data, trajectories):
+
+    def _create_hierarchical_embeddings(self, batch_data, trajectories, do_slice=True):
  
-        input_levels = batch_data.levels[:-1]
-        input_idx = batch_data.tokens[:-1]
-        S = input_idx.shape[0]
-        
-        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
-        ext_embds = self._get_ext_embds(trajectories)
-        
-        for l in range(self.L):
-            level_mask = (input_levels == l)
-            if level_mask.any():  
-                if l == 0: 
-                    x[:, level_mask] = ext_embds  # External embeddings!
-                else: 
-                    level_tokens = input_idx[level_mask]  
-                    level_embed = (self.wtes[l-1](level_tokens) + 
-                                self.level_embeddings[l-1].unsqueeze(0))
-                    x[:, level_mask] = level_embed
-        
-        return norm(x)
-
-    def _compute_hierarchical_loss(self, hidden_states, batch_data, trajectories):
-   
-        target_levels = batch_data.levels[1:]
-        target_idx = batch_data.tokens[1:]
-        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
-        
-        total_loss = 0.0 
-        total_weight = 0.0
-        
-        for l in range(self.L):
-            target_level_mask = (target_levels == l)
-            if target_level_mask.any():
-                
-                if l == 0:  # Special handling for level 0
-                    loss_mask_l0 = loss_mask[target_level_mask]
-                    action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
-                    state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
-                    
-                    action_loss = self.action_decoder.forward(
-                        hidden_states[:, target_level_mask][0, loss_mask_l0],
-                        action_tensor[1:][loss_mask_l0]
-                    )
-                    state_loss = self.state_decoder.forward(
-                        hidden_states[:, target_level_mask][0, loss_mask_l0],
-                        state_tensor[1:][loss_mask_l0]
-                    )
-                    level_loss = action_loss + state_loss
-                    
-                else:  # Standard language modeling for other levels
-                    target_level_mask = target_level_mask & loss_mask
-                    level_logits = self.lm_heads[l-1](hidden_states[:, target_level_mask])
-                    level_logits = 30 * torch.tanh(level_logits / 30).float()                
-                    level_loss = F.cross_entropy(
-                        level_logits.view(-1, level_logits.size(-1)),
-                        target_idx[target_level_mask]
-                    )
-                    
-                total_loss += self.level_weights[l] * level_loss
-                total_weight += self.level_weights[l]
-        
-        return total_loss / total_weight
-    
-
-    def forward(self, batch_data: BatchedHierSeq, trajectories: list):
-
-        input_idx = batch_data.tokens[:-1]
-        target_idx = batch_data.tokens[1:]
-        input_levels = batch_data.levels[:-1]
-        target_levels = batch_data.levels[1:]
-
-        sample_idx = batch_data.sample_idx
-
-        def markov_causal_mask(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
-            
-            pos = torch.arange(len(input_levels), device=input_levels.device)
-            markov_mask = (input_levels[kv_idx] == 0) & torch.any(
-                (pos > kv_idx) & (pos < q_idx) & (input_levels == 0))
-            
-            return causal_mask & sample_mask & ~markov_mask
-
-        S = input_idx.shape[0]
-        block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
         ext_embds = self._get_ext_embds(trajectories)
 
+        if do_slice: 
+            input_levels = batch_data.levels[:-1]
+            input_idx = batch_data.tokens[:-1]
+            if batch_data.levels[-1] == 0:
+                ext_embds = ext_embds[:, :-1]
+        else: 
+            input_levels, input_idx = batch_data.levels, batch_data.tokens
+
+        S = input_idx.shape[0]
         x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
 
-        for l in range(self.L): # per-level embedding
+        for l in range(self.L):
             level_mask = (input_levels == l)
 
             if level_mask.any():  
                 if l == 0: 
-                    x[:, level_mask] = ext_embds # place-holder tokens embedding replacement
+                    x[:, level_mask] = ext_embds.unsqueeze(0) # embedding replacement
                 else: 
                     level_tokens = input_idx[level_mask]  
                     level_embed = self.wtes[l-1](level_tokens) + self.level_embeddings[l-1].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
                     x[:,level_mask] = level_embed
 
-        x = norm(x)
-        x0 = x
-        v1 = None
+        return norm(x)
 
-        for i in range(self.num_layers):
-            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
-        x = norm(x)
+    def _compute_hierarchical_loss(self, x, batch_data, trajectories):
+   
+        target_levels = batch_data.levels[1:]
+        target_idx = batch_data.tokens[1:]
+        sample_idx = batch_data.sample_idx
+
+        if batch_data.levels[0] == 0:
+            action_tensor = torch.cat([t[1] for t in trajectories], dim=0)[1:]
+            state_tensor = torch.cat([t[0] for t in trajectories], dim=0)[1:]
+        else: 
+            action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
+            state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
+
 
         total_loss = 0.0 
         total_weight = 0.0
@@ -523,16 +519,13 @@ class APT(nn.Module):
                 if l == 0: 
                     loss_mask_l0 = loss_mask[target_level_mask]
 
-                    action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
-                    state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
-
                     action_select_loss = self.action_decoder.forward(
                         x[:, target_level_mask][0, loss_mask_l0],
-                        action_tensor[1:][loss_mask_l0]
+                        action_tensor[loss_mask_l0]
                     )
                     state_predict_loss = self.state_decoder.forward(
                         x[:, target_level_mask][0, loss_mask_l0],
-                        state_tensor[1:][loss_mask_l0]
+                        state_tensor[loss_mask_l0]
                     )
                     
                     level_loss = action_select_loss + state_predict_loss
@@ -546,58 +539,38 @@ class APT(nn.Module):
                     )
                 total_loss += self.level_weights[l] * level_loss
                 total_weight += self.level_weights[l]
-
+        
         return total_loss / total_weight
 
-    
-    def generate(self, batch_data: BatchedHierSeq):
 
-        input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
-        sample_idx = batch_data.sample_idx
+    def _hiearchical_generate(self, batch_data, trajectories): 
 
-        def sample_causal_mask(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
-            return causal_mask & sample_mask
-
-        S = input_idx.shape[0]
-        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
-        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
-
-        for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l)
-            if level_mask.any():  
-                level_tokens = input_idx[level_mask]  
-                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[:,level_mask] = level_embed
-
-        x = norm(x)
-        x0 = x
-        v1 = None
-
-        for i in range(self.num_layers):
-            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
-
-        x = norm(x)
-
-        for b in range(batch_data.batch_size):
-
+        level_groups = defaultdict(list) 
+        for b in range(batch_data.batch_size): 
             mask = sample_idx == b
-            l_next, t_next = get_next_token_level(input_levels[mask], input_timestamps[mask], self.K, self.L)
+            l_next, t_next = get_next_token_level(levels[mask], timestamps[mask], self.K, self.L)
+            level_groups[l_next].append((b, mask, t_next))
 
-            logits = self.lm_heads[l_next](x[0, mask][-1])
-            logits = 30 * torch.tanh(logits / 30).float()
-            next_token = torch.argmax(logits, dim=-1)
+        for l_next, group in level_groups.items(): 
+            batch_indices, masks, timestamps = zip(*group)
+            reprs = torch.stack([x[0, mask][-1] for mask in masks])
 
-            batch_data.insert_next_token(b, next_token, l_next, t_next)
+            if l_next == 0: 
+                actions = self.action_decoder.generate(reprs)
+                states = self.state_decoder.generate(reprs)
 
-        return batch_data
+                for i, b in enumerate(batch_indices): 
+                    trajectories[b] = (torch.cat([trajectories[b][0], states[i:i+1]]), 
+                                    torch.cat([trajectories[b][1], actions[i:i+1]]), trajectories[b][2])
+                    batch_data.insert_next_token(b, PLACE_HOLDER_TOK, l_next, timestamps[i])
+            else: 
+                tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
+                for i, b in enumerate(batch_indices):
+                    batch_data.insert_next_token(b, tokens[i], l_next, timestamps[i])
+
+        return batch_data, trajectories
 
 
 
-
-
-
-
+# TBD: DRA loss computation (using reward signal)
 # --------------------------------------------------------------------------------------------------------------------------
