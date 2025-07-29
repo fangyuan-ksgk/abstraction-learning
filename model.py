@@ -2,9 +2,11 @@ import glob
 import torch
 import itertools
 import torch.nn as nn
+import torch.nn.functional as F
+
 from pathlib import Path
 from typing import Optional
-import torch.nn.functional as F
+from collections import defaultdict 
 from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
@@ -418,7 +420,7 @@ class APT(nn.Module):
         return loss
 
     
-    def generate(self, batch_data: BatchedHierSeq):
+    def generate(self, batch_data: BatchedHierSeq, trajectories: list):
         """
         Note: trajectories w/o reward is newly generated
         """
@@ -450,7 +452,7 @@ class APT(nn.Module):
 
         x = norm(x)
 
-        batch_data, trajectories = self._hiearchical_generate(batch_data, trajectories)
+        batch_data, trajectories = self._hiearchical_generate(x, batch_data, trajectories)
 
         return batch_data, trajectories 
 
@@ -543,7 +545,10 @@ class APT(nn.Module):
         return total_loss / total_weight
 
 
-    def _hiearchical_generate(self, batch_data, trajectories): 
+    def _hiearchical_generate(self, x, batch_data, trajectories): 
+        levels = batch_data.levels
+        timestamps = batch_data.timestamps
+        sample_idx = batch_data.sample_idx
 
         level_groups = defaultdict(list) 
         for b in range(batch_data.batch_size): 
