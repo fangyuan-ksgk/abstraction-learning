@@ -446,3 +446,37 @@ class ActionDecoder(nn.Module):
         logits = self.lm_head(x)
         loss = F.cross_entropy(logits, target.long())
         return loss 
+
+
+class RandomAgent: 
+    def __init__(self, env):
+        self.env = env
+    
+    def act(self, obs):
+        return random.randint(0, 3)
+
+def collect_trajectories(env, agent,num_episodes=100, device="cuda"):
+    trajectories = []
+
+    for episode in range(100):
+        obs = env.reset()
+        total_reward = 0
+        states,actions,rewards = [],[],[]
+        while True:
+            action = agent.act(obs)
+            obs, reward, done, info = env.step(action)
+            states.append(torch.tensor(obs, dtype=torch.float32))
+            actions.append(torch.tensor(action, dtype=torch.long))
+            rewards.append(torch.tensor(reward, dtype=torch.float32))
+            
+            total_reward += reward
+            
+            if done:
+                print(f"Episode {episode}: Score={info['score']}, Reward={total_reward}")
+                break
+        
+        trajectory = (torch.stack(states).to(device), torch.stack(actions).to(device), torch.stack(rewards).to(device))
+        trajectories.append(trajectory)
+
+    env.close()
+    return trajectories

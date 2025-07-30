@@ -42,7 +42,7 @@ def create_loss_mask(sample_idx: torch.Tensor) -> torch.Tensor:
 # --------------------------------------------------------------------------------------------------------------------------
 
 @dataclass
-class BatchedHierSeq:
+class HierSeq:
 
     tokens: torch.Tensor          
     levels: torch.Tensor          
@@ -141,7 +141,7 @@ class BatchedHierSeq:
     
     def to(self, device):
         """Move all tensors to device."""
-        return BatchedHierSeq(
+        return HierSeq(
             tokens=self.tokens.to(device),
             levels=self.levels.to(device),
             timestamps=self.timestamps.to(device),
@@ -158,23 +158,19 @@ class BatchedHierSeq:
         """
         Insert next token for a specific sample at the end of that sample's sequence (in-place)
         """
-        # Find the last occurrence of this sample_idx
         sample_positions = torch.where(self.sample_idx == sample_idx)[0]
         if len(sample_positions) == 0:
             raise ValueError(f"Sample {sample_idx} not found in batch")
         
         last_pos = sample_positions[-1].item()
         
-        # Insert after the last position of this sample
         insert_pos = last_pos + 1
         
-        # Convert to tensor if needed
         if not torch.is_tensor(next_token):
             next_token = torch.tensor([next_token])
         elif next_token.dim() == 0:
             next_token = next_token.unsqueeze(0)
         
-        # Insert the new token in-place
         self.tokens = torch.cat([
             self.tokens[:insert_pos], 
             next_token,
@@ -200,5 +196,59 @@ class BatchedHierSeq:
         ])        
 
 # --------------------------------------------------------------------------------------------------------------------------
+
+# HierSeq only contains 'state', while HierTraj contains 'action & state'
+# --------------------------------------------------------------------------------------------------------------------------
+@dataclass
+class HierTraj(HierSeq):
+
+    @staticmethod
+    def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
+        """Flatten a single hierarchical sample by timestamp ordering."""
+
+        if timestamp_sequences is None:
+            timestamp_sequences = []
+            for level in range(L):
+                tokens = token_sequences[level]
+                if torch.is_tensor(tokens):
+                    seq_len = tokens.size(0)
+                    tokens = tokens.tolist()
+                else:
+                    seq_len = len(tokens)
+                
+                if level == 0: 
+                    timestamp_sequences.append([i//2 for i in range(seq_len + 1)][1:]) # [0, 1, 1, 2, 2, 3, 3, ...]
+                else:
+                    gap = K ** level
+                    timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
+            
+        items = []
+        for level in range(L):
+            tokens = token_sequences[level]
+            timestamps = timestamp_sequences[level]
+            
+            if torch.is_tensor(tokens):
+                tokens = tokens.tolist()
+            
+            assert len(tokens) == len(timestamps), \
+                f"Level {level}: token count ({len(tokens)}) != timestamp count ({len(timestamps)})"
+            
+            for token, timestamp in zip(tokens, timestamps):
+                items.append((timestamp, level, token))
+        
+        items.sort(key=lambda x: (x[0], x[1])) # Sort by timestamp, then by level
+        
+        sorted_tokens = [item[2] for item in items]
+        sorted_levels = [item[1] for item in items]
+        sorted_timestamps = [item[0] for item in items]
+        
+        return (
+            torch.tensor(sorted_tokens, dtype=torch.long),
+            torch.tensor(sorted_levels, dtype=torch.long), 
+            torch.tensor(sorted_timestamps, dtype=torch.long)
+        )
+
+# --------------------------------------------------------------------------------------------------------------------------
+
 
 

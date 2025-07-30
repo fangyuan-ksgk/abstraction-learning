@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import PLACE_HOLDER_TOK
-from utils import get_next_token_level, BatchedHierSeq, create_loss_mask
+from utils import get_next_token_level, HierSeq, create_loss_mask
 
 
 # GPT 
@@ -231,7 +231,7 @@ class GAT(nn.Module):
         self._compile = config._compile
         self.level_weights = config.level_weights
 
-    def forward(self, batch_data: BatchedHierSeq):
+    def forward(self, batch_data: HierSeq):
 
         input_idx = batch_data.tokens[:-1]
         target_idx = batch_data.tokens[1:]
@@ -286,7 +286,7 @@ class GAT(nn.Module):
         return total_loss / total_weight
 
     
-    def generate(self, batch_data: BatchedHierSeq):
+    def generate(self, batch_data: HierSeq):
 
         input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
         sample_idx = batch_data.sample_idx
@@ -333,11 +333,13 @@ class GAT(nn.Module):
 # --------------------------------------------------------------------------------------------------------------------------
 
 
+
+# It's hard to believe how much things are complicated when I try to build a GAT module for RL Agent. 
 # Abstract Policy Transformer (APT) for Snake Game and more
 # --------------------------------------------------------------------------------------------------------------------------
 
 @dataclass
-class APTConfig:
+class DATConfig:
     n_layer : int = 4
     n_head : int = 2
     n_embd : int = 64
@@ -350,8 +352,8 @@ class APTConfig:
     level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
 
 
-# Abstract policy transformer (APT)
-class APT(nn.Module):
+# Abstract Decision transformer (DAT)
+class DAT(nn.Module):
 
     def __init__(
             self, 
@@ -388,7 +390,7 @@ class APT(nn.Module):
         self.level_weights = config.level_weights
     
 
-    def forward(self, batch_data: BatchedHierSeq, trajectories: list):
+    def forward(self, batch_data: HierSeq, trajectories: list):
 
         input_levels = batch_data.levels[:-1]
         sample_idx = batch_data.sample_idx
@@ -420,7 +422,7 @@ class APT(nn.Module):
         return loss
 
     
-    def generate(self, batch_data: BatchedHierSeq, trajectories: list):
+    def generate(self, batch_data: HierSeq, trajectories: list):
         """
         Note: trajectories w/o reward is newly generated
         """
