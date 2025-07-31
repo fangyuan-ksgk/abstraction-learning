@@ -458,10 +458,11 @@ class RandomAgent:
 def collect_trajectories(env, agent,num_episodes=100, device="cuda"):
     trajectories = []
 
-    for episode in range(100):
+    for episode in range(num_episodes):
         obs = env.reset()
         total_reward = 0
         states,actions,rewards = [],[],[]
+        states.append(torch.tensor(obs, dtype=torch.float32)) # initial state
         while True:
             action = agent.act(obs)
             obs, reward, done, info = env.step(action)

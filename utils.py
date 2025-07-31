@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Union
 import torch
+from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 
 
 # Generation Helper functions: Decide the next token level & timestamp to generate 
@@ -33,6 +34,14 @@ def create_loss_mask(sample_idx: torch.Tensor) -> torch.Tensor:
     sample_starts[0] = True 
     sample_starts[1:] = sample_idx[1:] != sample_idx[:-1]
     return ~sample_starts
+
+
+def make_interleave_embd(state_embd, act_embd): 
+    T = state_embd.shape[0]
+    interleave_embd = [act_embd[i//2] if i % 2 == 0 else state_embd[i//2] 
+                for i in range(2*T-1)]
+    interleave_embd = torch.stack(interleave_embd, dim=0)
+    return interleave_embd
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -197,14 +206,62 @@ class HierSeq:
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-# HierSeq only contains 'state', while HierTraj contains 'action & state'
+# HierTraj contains 'action & state'
+# Assumption: HierTraj must begin with an initial state (0-th level token). 
 # --------------------------------------------------------------------------------------------------------------------------
 @dataclass
-class HierTraj(HierSeq):
+class HierTraj:
 
+    tokens: torch.Tensor          
+    levels: torch.Tensor          
+    timestamps: torch.Tensor      
+    state_mask: torch.Tensor
+    action_mask: torch.Tensor
+
+    sample_idx: torch.Tensor       
+    batch_size: int
+    K: int  
+    L: int 
+    
+    @classmethod
+    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int):
+
+        batch_tokens = []
+        batch_levels = []
+        batch_timestamps = []
+        batch_state_mask = []
+        batch_action_mask = []
+        batch_sample_idx = []
+        
+        for token_seqs, timestamp_seqs in samples_data:
+
+            tokens, levels, timestamps, state_mask, action_mask = cls._flatten_single_sample(
+                token_seqs, timestamp_seqs, K, L
+            )
+            
+            batch_tokens.append(tokens)
+            batch_levels.append(levels)
+            batch_timestamps.append(timestamps)
+            batch_state_mask.append(state_mask)
+            batch_action_mask.append(action_mask)
+            sample_idx = batch_sample_idx[-1] + 1 if batch_sample_idx else 0
+            batch_sample_idx += [sample_idx] * len(tokens)
+
+        return cls(
+            tokens=torch.cat(batch_tokens),
+            levels=torch.cat(batch_levels),
+            timestamps=torch.cat(batch_timestamps),
+            state_mask=torch.cat(batch_state_mask),
+            action_mask=torch.cat(batch_action_mask),
+            sample_idx=torch.tensor(batch_sample_idx),
+            batch_size=len(samples_data),
+            K=K,
+            L=L
+        )
+    
     @staticmethod
     def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
-        """Flatten a single hierarchical sample by timestamp ordering."""
+        """Flatten a single hierarchical trajectory by timestamp ordering."""
 
         if timestamp_sequences is None:
             timestamp_sequences = []
@@ -241,14 +298,123 @@ class HierTraj(HierSeq):
         sorted_tokens = [item[2] for item in items]
         sorted_levels = [item[1] for item in items]
         sorted_timestamps = [item[0] for item in items]
+        sorted_state_mask = [item[2] == PLACE_HOLDER_STATE_TOK for item in items]
+        sorted_action_mask = [item[2] == PLACE_HOLDER_ACTION_TOK for item in items]
         
         return (
             torch.tensor(sorted_tokens, dtype=torch.long),
             torch.tensor(sorted_levels, dtype=torch.long), 
-            torch.tensor(sorted_timestamps, dtype=torch.long)
+            torch.tensor(sorted_timestamps, dtype=torch.long),
+            torch.tensor(sorted_state_mask, dtype=torch.bool),
+            torch.tensor(sorted_action_mask, dtype=torch.bool)
         )
+
+    def get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Get a single sample by index."""
+        
+        mask = (self.sample_idx == idx)
+        
+        return (
+            self.tokens[mask],
+            self.levels[mask], 
+            self.timestamps[mask],
+            self.state_mask[mask],
+            self.action_mask[mask],
+            mask
+        )
+    
+    def to(self, device):
+        """Move all tensors to device."""
+        return HierTraj(
+            tokens=self.tokens.to(device),
+            levels=self.levels.to(device),
+            timestamps=self.timestamps.to(device),
+            state_mask=self.state_mask.to(device),
+            action_mask=self.action_mask.to(device),
+            sample_idx=self.sample_idx.to(device),
+            batch_size=self.batch_size,
+            K=self.K,
+            L=self.L
+        )
+    
+    def __len__(self):
+        return self.batch_size
+
+    def insert_next_token(self, sample_idx: int, next_token: torch.Tensor, next_level: int, next_timestamp: int):
+        """
+        Insert next token for a specific sample at the end of that sample's sequence (in-place)
+        """
+        sample_positions = torch.where(self.sample_idx == sample_idx)[0]
+        if len(sample_positions) == 0:
+            raise ValueError(f"Sample {sample_idx} not found in batch")
+        
+        last_pos = sample_positions[-1].item()
+        
+        insert_pos = last_pos + 1
+        
+        if not torch.is_tensor(next_token):
+            next_token = torch.tensor([next_token])
+        elif next_token.dim() == 0:
+            next_token = next_token.unsqueeze(0)
+        
+        self.tokens = torch.cat([
+            self.tokens[:insert_pos], 
+            next_token,
+            self.tokens[insert_pos:]
+        ])
+        
+        self.levels = torch.cat([
+            self.levels[:insert_pos],
+            torch.tensor([next_level]),
+            self.levels[insert_pos:]
+        ])
+        
+        self.timestamps = torch.cat([
+            self.timestamps[:insert_pos],
+            torch.tensor([next_timestamp]),
+            self.timestamps[insert_pos:]
+        ])
+        
+        self.sample_idx = torch.cat([
+            self.sample_idx[:insert_pos],
+            torch.tensor([sample_idx]),
+            self.sample_idx[insert_pos:]
+        ]) 
+
+        if next_token.item() == PLACE_HOLDER_STATE_TOK:
+            self.state_mask = torch.cat([
+                self.state_mask[:insert_pos],
+                torch.tensor([True]),
+                self.state_mask[insert_pos:]
+            ])
+        elif next_token.item() == PLACE_HOLDER_ACTION_TOK: 
+            self.action_mask = torch.cat([
+                self.action_mask[:insert_pos],
+                torch.tensor([True]),
+                self.action_mask[insert_pos:]
+            ])
 
 # --------------------------------------------------------------------------------------------------------------------------
 
 
 
+# Sanity check functions
+# --------------------------------------------------------------------------------------------------------------------------
+
+def data_sanity_check(batch_data, trajectories): 
+    d_len = sum([t[0].size(0)+t[1].size(0) for t in trajectories])
+    t_len = sum(batch_data.levels == 0)
+    assert d_len == t_len, f"Batch data token length mismatch with trajecotories: {d_len} != {t_len}"
+    print(f"Sanity check passed: total {t_len} 0-th level tokens (state & action)")
+
+    n_state_data = sum(batch_data.state_mask).item()
+    n_state_traj = sum([t[0].size(0) for t in trajectories])
+    assert n_state_data == n_state_traj, f"State data & trajectory mismatch: {n_state_data} != {n_state_traj}"
+    print(f"Sanity check passed: {n_state_data} state tokens in data, {n_state_traj} state tokens in trajectories")
+
+    n_act_data = sum(batch_data.action_mask).item()
+    n_act_traj = sum([t[1].size(0) for t in trajectories])
+    assert n_act_data == n_act_traj, f"Action data & trajectory mismatch: {n_act_data} != {n_act_traj}"
+    print(f"Sanity check passed: {n_act_data} action tokens in data, {n_act_traj} action tokens in trajectories")
+
+    return 

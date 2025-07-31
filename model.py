@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import PLACE_HOLDER_TOK
-from utils import get_next_token_level, HierSeq, create_loss_mask
+from utils import get_next_token_level, HierSeq, HierTraj, create_loss_mask, make_interleave_embd
 
 
 # GPT 
@@ -406,7 +406,7 @@ class DAT(nn.Module):
         S = input_levels.shape[0]
         block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
-        x = self._create_hierarchical_embeddings(batch_data, trajectories)
+        x = self._create_htraj_embd(batch_data, trajectories)
 
         x = norm(x)
         x0 = x
@@ -417,7 +417,7 @@ class DAT(nn.Module):
 
         x = norm(x)
 
-        loss = self._compute_hierarchical_loss(x, batch_data, trajectories)
+        loss = self._compute_htraj_loss(x, batch_data, trajectories)
 
         return loss
 
@@ -443,7 +443,7 @@ class DAT(nn.Module):
         S = levels.shape[0]
         block_mask = create_block_mask(markov_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
-        x = self._create_hierarchical_embeddings(batch_data, trajectories, do_slice=False)
+        x = self._create_htraj_embd(batch_data, trajectories, do_slice=False)
 
         x = norm(x)
         x0 = x
@@ -459,25 +459,37 @@ class DAT(nn.Module):
         return batch_data, trajectories 
 
 
-    def _get_ext_embds(self, trajectories): 
-        ext_embds = []
+    def _embd_trajectory(self, trajectories: list) -> torch.Tensor:
+        """ 
+        (a). with initial state [s, (a,s), ...] (b). without initial state [(a,s),(a,s),...]
+        """
+        embds = [] 
         for trajectory in trajectories:
-            state_embd = self.state_encoder(trajectory[0])
-            action_embd = self.action_encoder(trajectory[1])
-            extended_embd = torch.cat([action_embd, state_embd], dim=1)
-            ext_embds.append(extended_embd)
-        return torch.cat(ext_embds, dim=0).unsqueeze(0)
+
+            s_embd = self.state_encoder(trajectory[0])
+            a_embd = self.action_encoder(trajectory[1])
+            n_state, n_act = s_embd.shape[0], a_embd.shape[0]
+            
+            if n_state == n_act + 1: 
+                traj_embd = torch.stack([s_embd[i//2] if i % 2 == 0 else a_embd[i//2] for i in range(2*n_state-1)], dim=0)
+            else: 
+                assert n_state == n_act, "Missing extra initial state"
+                traj_embd = torch.stack([a_embd[i//2] if i % 2 == 0 else s_embd[i//2] for i in range(2*n_act)], dim=0)
+
+            embds.append(traj_embd)
+
+        return torch.cat(embds, dim=0).unsqueeze(0)                
 
 
-    def _create_hierarchical_embeddings(self, batch_data, trajectories, do_slice=True):
+    def _create_htraj_embd(self, batch_data: HierTraj, trajectories: list, do_slice: bool = True) -> torch.Tensor: 
  
-        ext_embds = self._get_ext_embds(trajectories)
+        traj_embds = self._embd_trajectory(trajectories)
 
         if do_slice: 
             input_levels = batch_data.levels[:-1]
             input_idx = batch_data.tokens[:-1]
             if batch_data.levels[-1] == 0:
-                ext_embds = ext_embds[:, :-1]
+                traj_embds = traj_embds[:, :-1]
         else: 
             input_levels, input_idx = batch_data.levels, batch_data.tokens
 
@@ -489,7 +501,7 @@ class DAT(nn.Module):
 
             if level_mask.any():  
                 if l == 0: 
-                    x[:, level_mask] = ext_embds.unsqueeze(0) # embedding replacement
+                    x[:, level_mask] = traj_embds # embedding replacement
                 else: 
                     level_tokens = input_idx[level_mask]  
                     level_embed = self.wtes[l-1](level_tokens) + self.level_embeddings[l-1].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
@@ -498,55 +510,43 @@ class DAT(nn.Module):
         return norm(x)
 
 
-    def _compute_hierarchical_loss(self, x, batch_data, trajectories):
+    # HierTraj must begin with an initial state (0-th level token)
+    def _compute_htraj_loss(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
    
-        target_levels = batch_data.levels[1:]
-        target_idx = batch_data.tokens[1:]
-        sample_idx = batch_data.sample_idx
-
-        if batch_data.levels[0] == 0:
-            action_tensor = torch.cat([t[1] for t in trajectories], dim=0)[1:]
-            state_tensor = torch.cat([t[0] for t in trajectories], dim=0)[1:]
-        else: 
-            action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
-            state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
-
+        action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
+        state_tensor = torch.cat([t[0][1:] for t in trajectories], dim=0)
 
         total_loss = 0.0 
         total_weight = 0.0
-        loss_mask = create_loss_mask(sample_idx)[1:]
+        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
 
         for l in range(self.L): # per-level projection
-            target_level_mask = (target_levels == l)
-            if target_level_mask.any():
-
+            mask = (batch_data.levels[1:] == l) & loss_mask
+            
+            if mask.any():
                 if l == 0: 
-                    loss_mask_l0 = loss_mask[target_level_mask]
-
                     action_select_loss = self.action_decoder.forward(
-                        x[:, target_level_mask][0, loss_mask_l0],
-                        action_tensor[loss_mask_l0]
+                        x[0, mask & batch_data.action_mask[1:]],
+                        action_tensor
                     )
                     state_predict_loss = self.state_decoder.forward(
-                        x[:, target_level_mask][0, loss_mask_l0],
-                        state_tensor[loss_mask_l0]
+                        x[0, mask & batch_data.state_mask[1:]],
+                        state_tensor 
                     )
-                    
                     level_loss = action_select_loss + state_predict_loss
                 else: 
-                    target_level_mask = target_level_mask & loss_mask
-                    level_logits = self.lm_heads[l-1](x[:, target_level_mask])
+                    level_logits = self.lm_heads[l-1](x[:, mask])
                     level_logits = 30 * torch.tanh(level_logits / 30).float()                
                     level_loss = F.cross_entropy(
                         level_logits.view(-1, level_logits.size(-1)),
-                        target_idx[target_level_mask]
+                        batch_data.tokens[1:][mask]
                     )
-                total_loss += self.level_weights[l] * level_loss
-                total_weight += self.level_weights[l]
+                    total_loss += self.level_weights[l] * level_loss
+                    total_weight += self.level_weights[l]
         
         return total_loss / total_weight
 
-
+    # TBD: Change on the 'get_next_token_level' to a trajectory specific function (take care of interleaving action & state with initial state ver.)
     def _hiearchical_generate(self, x, batch_data, trajectories): 
         levels = batch_data.levels
         timestamps = batch_data.timestamps
