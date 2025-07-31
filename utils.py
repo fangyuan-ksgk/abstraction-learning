@@ -434,7 +434,7 @@ def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: 
         next_time = current_time + time_offset
         return next_level, next_time, token
 
-    if current_level == batch_data.L - 1: 
+    if current_level == L - 1: 
         return make_return(0, 1, PLACE_HOLDER_ACTION_TOK)
 
     if current_level == 0: 
