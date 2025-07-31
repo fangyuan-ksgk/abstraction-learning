@@ -510,7 +510,6 @@ class DAT(nn.Module):
         return norm(x)
 
 
-    # HierTraj must begin with an initial state (0-th level token)
     def _compute_htraj_loss(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
    
         action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
@@ -546,7 +545,11 @@ class DAT(nn.Module):
         
         return total_loss / total_weight
 
+
     # TBD: Change on the 'get_next_token_level' to a trajectory specific function (take care of interleaving action & state with initial state ver.)
+    # - generation of 0-th level token can be on state or action, although in practice, one-step contains action->state, it's better to 
+    # - split into single-token generation, since this time-step could contain multiple higher-level tokens, too. 
+    
     def _hiearchical_generate(self, x, batch_data, trajectories): 
         levels = batch_data.levels
         timestamps = batch_data.timestamps

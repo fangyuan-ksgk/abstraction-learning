@@ -12,21 +12,22 @@ def get_next_token_level(levels, timestamps, K, L):
     current_level = levels[-1]
     current_time = timestamps[-1]
 
+    def make_return(level, time_offset=0):
+        next_level = torch.tensor(level, dtype=levels.dtype, device=levels.device) if isinstance(level, int) else level
+        next_time = current_time + time_offset
+        return next_level, next_time
+
     if current_level == L - 1:
-        next_level = torch.tensor(0, dtype=levels.dtype, device=levels.device)
-        next_timestamp = current_time + 1
-        return next_level, next_timestamp
+        return make_return(0, 1)
 
     mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
-    do_plan = all(levels[mask] == current_level)
-    if do_plan: 
-        next_level = current_level + 1
-        next_timestamp = current_time
-    else: 
-        next_level = torch.tensor(0, dtype=levels.dtype, device=levels.device)
-        next_timestamp = current_time + 1
+    is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1)
+    do_plan = all(levels[mask] == current_level) & is_enough
 
-    return next_level, next_timestamp
+    if do_plan: 
+        return make_return(current_level + 1, 0)
+    else: 
+        return make_return(0, 1)
 
 
 # Is it possible to create a 'loss_mask' for action / state tokens, too?
@@ -420,6 +421,48 @@ def create_traj_loss_mask(batch_data: HierTraj):
     loss_mask_state, loss_mask_action = torch.tensor(loss_mask_state), torch.tensor(loss_mask_action)
 
     return create_loss_mask(sample_idx)[1:], loss_mask_state, loss_mask_action
+
+
+def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: torch.Tensor, K: int, L: int): 
+
+    current_level = levels[-1]
+    current_time = timestamps[-1]
+    next_token = None
+
+    def make_return(level, time_offset=0, token=None):
+        next_level = torch.tensor(level, dtype=levels.dtype, device=levels.device) if isinstance(level, int) else level
+        next_time = current_time + time_offset
+        return next_level, next_time, token
+
+    if current_level == batch_data.L - 1: 
+        return make_return(0, 1, PLACE_HOLDER_ACTION_TOK)
+
+    if current_level == 0: 
+        
+        mask = torch.logical_and(levels >= current_level, timestamps >= current_time - 2*K + 1)
+        flip_tokens = torch.flip(tokens[mask], dims=[0])
+        is_complete = torch.cat([flip_tokens[1::2] == PLACE_HOLDER_ACTION_TOK, flip_tokens[::2] == PLACE_HOLDER_STATE_TOK]).all()
+        is_enough = torch.flip(timestamps[mask], dims=[0])[1::2][-1] == (current_time - K + 1)
+        do_plan = all(levels[mask] == current_level) & is_complete & is_enough
+
+        if do_plan: 
+            return make_return(current_level + 1, 0)
+        else: 
+            current_token = tokens[-1]
+            if current_token == PLACE_HOLDER_ACTION_TOK: 
+                return make_return(0, 0, PLACE_HOLDER_STATE_TOK)
+            elif current_token == PLACE_HOLDER_STATE_TOK:
+                return make_return(0, 1, PLACE_HOLDER_ACTION_TOK)
+            else:
+                raise ValueError(f"Invalid 0th level token: {current_token}")
+    else: 
+        mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
+        is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1)
+        do_plan = all(levels[mask] == current_level)
+        if do_plan: 
+            return make_return(current_level + 1, 0)
+        else: 
+            return make_return(0, 1)
 
 
 
