@@ -29,6 +29,7 @@ def get_next_token_level(levels, timestamps, K, L):
     return next_level, next_timestamp
 
 
+# Is it possible to create a 'loss_mask' for action / state tokens, too?
 def create_loss_mask(sample_idx: torch.Tensor) -> torch.Tensor:
     sample_starts = torch.zeros_like(sample_idx, dtype=torch.bool)
     sample_starts[0] = True 
@@ -397,6 +398,30 @@ class HierTraj:
 # --------------------------------------------------------------------------------------------------------------------------
 
 
+def create_traj_loss_mask(batch_data: HierTraj): 
+
+    sample_idx = batch_data.sample_idx
+    tokens = batch_data.tokens
+
+    batch_data.batch_size
+    loss_mask_state, loss_mask_action = [], [] 
+    for b in range(batch_data.batch_size): 
+
+        sample_tokens = tokens[sample_idx == b]
+        ft = sample_tokens[0].item() 
+        ft_state, ft_action = ft == PLACE_HOLDER_STATE_TOK, ft == PLACE_HOLDER_ACTION_TOK
+
+        sample_state_size = sum(sample_tokens == PLACE_HOLDER_STATE_TOK).item()
+        sample_action_size = sum(sample_tokens == PLACE_HOLDER_ACTION_TOK).item()
+
+        loss_mask_state += [True] * sample_state_size if not ft_state else [False] + [True] * (sample_state_size - 1)
+        loss_mask_action += [True] * sample_action_size if not ft_action else [False] + [True] * (sample_action_size - 1)
+
+    loss_mask_state, loss_mask_action = torch.tensor(loss_mask_state), torch.tensor(loss_mask_action)
+
+    return create_loss_mask(sample_idx)[1:], loss_mask_state, loss_mask_action
+
+
 
 # Sanity check functions
 # --------------------------------------------------------------------------------------------------------------------------
@@ -418,3 +443,5 @@ def data_sanity_check(batch_data, trajectories):
     print(f"Sanity check passed: {n_act_data} action tokens in data, {n_act_traj} action tokens in trajectories")
 
     return 
+
+

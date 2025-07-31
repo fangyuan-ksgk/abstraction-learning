@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from constant import PLACE_HOLDER_TOK
-from utils import get_next_token_level, HierSeq, HierTraj, create_loss_mask, make_interleave_embd
+from utils import get_next_token_level, HierSeq, HierTraj, create_loss_mask, make_interleave_embd, create_traj_loss_mask
 
 
 # GPT 
@@ -514,11 +514,11 @@ class DAT(nn.Module):
     def _compute_htraj_loss(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
    
         action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
-        state_tensor = torch.cat([t[0][1:] for t in trajectories], dim=0)
+        state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
 
         total_loss = 0.0 
         total_weight = 0.0
-        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
+        loss_mask, loss_mask_state, loss_mask_action = create_traj_loss_mask(batch_data)
 
         for l in range(self.L): # per-level projection
             mask = (batch_data.levels[1:] == l) & loss_mask
@@ -527,11 +527,11 @@ class DAT(nn.Module):
                 if l == 0: 
                     action_select_loss = self.action_decoder.forward(
                         x[0, mask & batch_data.action_mask[1:]],
-                        action_tensor
+                        action_tensor[loss_mask_action]
                     )
                     state_predict_loss = self.state_decoder.forward(
                         x[0, mask & batch_data.state_mask[1:]],
-                        state_tensor 
+                        state_tensor[loss_mask_state]
                     )
                     level_loss = action_select_loss + state_predict_loss
                 else: 
