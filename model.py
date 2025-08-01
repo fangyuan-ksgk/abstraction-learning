@@ -545,40 +545,62 @@ class DAT(nn.Module):
         
         return total_loss / total_weight
 
-
-    # TBD: Change on the 'get_next_token_level' to a trajectory specific function (take care of interleaving action & state with initial state ver.)
-    # - generation of 0-th level token can be on state or action, although in practice, one-step contains action->state, it's better to 
-    # - split into single-token generation, since this time-step could contain multiple higher-level tokens, too. 
     
-    def _hiearchical_generate(self, x, batch_data, trajectories): 
-        levels = batch_data.levels
-        timestamps = batch_data.timestamps
-        sample_idx = batch_data.sample_idx
-
-        level_groups = defaultdict(list) 
-        for b in range(batch_data.batch_size): 
-            mask = sample_idx == b
-            l_next, t_next = get_next_token_level(levels[mask], timestamps[mask], self.K, self.L)
-            level_groups[l_next].append((b, mask, t_next))
-
+    def _hiearchical_generate(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list): 
+        level_groups = self._group_by_next_level(batch_data)
+        
         for l_next, group in level_groups.items(): 
-            batch_indices, masks, timestamps = zip(*group)
-            reprs = torch.stack([x[0, mask][-1] for mask in masks])
-
+            batch_indices, masks, timestamps, toks_next = zip(*group)
+            
             if l_next == 0: 
-                actions = self.action_decoder.generate(reprs)
-                states = self.state_decoder.generate(reprs)
-
-                for i, b in enumerate(batch_indices): 
-                    trajectories[b] = (torch.cat([trajectories[b][0], states[i:i+1]]), 
-                                    torch.cat([trajectories[b][1], actions[i:i+1]]), trajectories[b][2])
-                    batch_data.insert_next_token(b, PLACE_HOLDER_TOK, l_next, timestamps[i])
+                self._process_level_zero_tokens(x, masks, toks_next, batch_indices, timestamps, batch_data, trajectories)
             else: 
-                tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
-                for i, b in enumerate(batch_indices):
-                    batch_data.insert_next_token(b, tokens[i], l_next, timestamps[i])
+                self._process_higher_level_tokens(x, masks, batch_indices, timestamps, batch_data, l_next)
 
         return batch_data, trajectories
+
+    def _group_by_next_level(self, batch_data: HierTraj):
+        level_groups = defaultdict(list) 
+        for b in range(batch_data.batch_size): 
+            mask = batch_data.sample_idx == b
+            l_next, t_next, tok_next = get_next_traj_token(
+                batch_data.levels[mask], batch_data.timestamps[mask], batch_data.tokens[mask], self.K, self.L
+            )
+            level_groups[l_next.item()].append((b, mask, t_next, tok_next))
+        return level_groups
+
+    def _process_level_zero_tokens(self, x: torch.Tensor, masks: torch.Tensor, toks_next: torch.Tensor, batch_indices: list, timestamps: torch.Tensor, batch_data: HierTraj, trajectories: list):
+        
+        actions = self._generate_tokens_by_type(x, masks, toks_next, PLACE_HOLDER_ACTION_TOK, self.action_decoder)
+        states = self._generate_tokens_by_type(x, masks, toks_next, PLACE_HOLDER_STATE_TOK, self.state_decoder)
+
+        i_a = i_s = 0
+        for b in batch_indices: 
+            if toks_next[b] == PLACE_HOLDER_ACTION_TOK: 
+                trajectories[b] = (trajectories[b][0], torch.cat([trajectories[b][1], actions[i_a:i_a+1]]), trajectories[b][2])
+                batch_data.insert_next_token(b, PLACE_HOLDER_ACTION_TOK, 0, timestamps[b])
+                i_a += 1
+            elif toks_next[b] == PLACE_HOLDER_STATE_TOK: 
+                trajectories[b] = (torch.cat([trajectories[b][0], states[i_s:i_s+1]]), trajectories[b][1], trajectories[b][2])
+                batch_data.insert_next_token(b, PLACE_HOLDER_STATE_TOK, 0, timestamps[b])
+                i_s += 1
+            else: 
+                raise ValueError(f"Invalid token: {toks_next[b]}")
+
+    def _generate_tokens_by_type(self, x: torch.Tensor, masks: torch.Tensor, toks_next: torch.Tensor, token_type: int, decoder: nn.Module):
+        filtered_masks = [mask for mask, tok in zip(masks, toks_next) if tok == token_type]
+        if not filtered_masks:
+            return None
+        reprs = torch.stack([x[0, mask][-1] for mask in filtered_masks])
+        return decoder.generate(reprs)
+
+    def _process_higher_level_tokens(self, x: torch.Tensor, masks: torch.Tensor, batch_indices: list, timestamps: torch.Tensor, batch_data: HierTraj, l_next: int):
+        
+        reprs = torch.stack([x[0, mask][-1] for mask in masks])
+        tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
+        
+        for b, timestamp in zip(batch_indices, timestamps):
+            batch_data.insert_next_token(b, tokens[b], l_next, timestamp)
 
 
 
