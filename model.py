@@ -10,8 +10,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-from constant import PLACE_HOLDER_TOK
-from utils import get_next_token_level, HierSeq, HierTraj, create_loss_mask, make_interleave_embd, create_traj_loss_mask
+from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
+from utils import (
+    get_next_token_level, HierSeq, HierTraj, create_loss_mask,
+    make_interleave_embd, create_traj_loss_mask, get_next_traj_token
+)
 
 
 # GPT 
@@ -459,22 +462,27 @@ class DAT(nn.Module):
         return batch_data, trajectories 
 
 
-    def _embd_trajectory(self, trajectories: list) -> torch.Tensor:
+    def _embd_trajectory(self, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
         """ 
-        (a). with initial state [s, (a,s), ...] (b). without initial state [(a,s),(a,s),...]
+        (a). [s,a] (b). [a,s] (c). [s,a,s] (d). [a,s,a]
         """
         embds = [] 
-        for trajectory in trajectories:
+        for b, trajectory in enumerate(trajectories):
 
             s_embd = self.state_encoder(trajectory[0])
             a_embd = self.action_encoder(trajectory[1])
             n_state, n_act = s_embd.shape[0], a_embd.shape[0]
-            
-            if n_state == n_act + 1: 
-                traj_embd = torch.stack([s_embd[i//2] if i % 2 == 0 else a_embd[i//2] for i in range(2*n_state-1)], dim=0)
-            else: 
-                assert n_state == n_act, "Missing extra initial state"
+
+            sample_l0_mask = torch.logical_and(batch_data.levels == 0, batch_data.sample_idx == b)
+            first_tok = batch_data.tokens[sample_l0_mask][0].item()
+            ft_act = first_tok == PLACE_HOLDER_ACTION_TOK
+
+            if ft_act: 
+                assert n_state <= n_act <= n_state + 1, "Missing action or state token"
                 traj_embd = torch.stack([a_embd[i//2] if i % 2 == 0 else s_embd[i//2] for i in range(2*n_act)], dim=0)
+            else: 
+                assert n_act <= n_state <= n_act + 1, "Missing action or state token"
+                traj_embd = torch.stack([s_embd[i//2] if i % 2 == 0 else a_embd[i//2] for i in range(2*n_state-1)], dim=0)
 
             embds.append(traj_embd)
 
@@ -483,7 +491,7 @@ class DAT(nn.Module):
 
     def _create_htraj_embd(self, batch_data: HierTraj, trajectories: list, do_slice: bool = True) -> torch.Tensor: 
  
-        traj_embds = self._embd_trajectory(trajectories)
+        traj_embds = self._embd_trajectory(batch_data, trajectories)
 
         if do_slice: 
             input_levels = batch_data.levels[:-1]
@@ -546,20 +554,7 @@ class DAT(nn.Module):
         return total_loss / total_weight
 
     
-    def _hiearchical_generate(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list): 
-        level_groups = self._group_by_next_level(batch_data)
-        
-        for l_next, group in level_groups.items(): 
-            batch_indices, masks, timestamps, toks_next = zip(*group)
-            
-            if l_next == 0: 
-                self._process_level_zero_tokens(x, masks, toks_next, batch_indices, timestamps, batch_data, trajectories)
-            else: 
-                self._process_higher_level_tokens(x, masks, batch_indices, timestamps, batch_data, l_next)
-
-        return batch_data, trajectories
-
-    def _group_by_next_level(self, batch_data: HierTraj):
+    def _group_by_next_level(self, batch_data):
         level_groups = defaultdict(list) 
         for b in range(batch_data.batch_size): 
             mask = batch_data.sample_idx == b
@@ -569,7 +564,16 @@ class DAT(nn.Module):
             level_groups[l_next.item()].append((b, mask, t_next, tok_next))
         return level_groups
 
-    def _process_level_zero_tokens(self, x: torch.Tensor, masks: torch.Tensor, toks_next: torch.Tensor, batch_indices: list, timestamps: torch.Tensor, batch_data: HierTraj, trajectories: list):
+    def _generate_tokens_by_type(self, x, masks, toks_next, token_type, decoder):
+        filtered_masks = [mask for mask, tok in zip(masks, toks_next) if tok == token_type]
+        if not filtered_masks:
+            return None
+        reprs = torch.stack([x[0, mask][-1] for mask in filtered_masks])
+        return decoder.generate(reprs)
+        
+    def _process_zero_level_tokens(self, x, group, batch_data, trajectories):
+
+        batch_indices, masks, timestamps, toks_next = zip(*group)
         
         actions = self._generate_tokens_by_type(x, masks, toks_next, PLACE_HOLDER_ACTION_TOK, self.action_decoder)
         states = self._generate_tokens_by_type(x, masks, toks_next, PLACE_HOLDER_STATE_TOK, self.state_decoder)
@@ -587,20 +591,28 @@ class DAT(nn.Module):
             else: 
                 raise ValueError(f"Invalid token: {toks_next[b]}")
 
-    def _generate_tokens_by_type(self, x: torch.Tensor, masks: torch.Tensor, toks_next: torch.Tensor, token_type: int, decoder: nn.Module):
-        filtered_masks = [mask for mask, tok in zip(masks, toks_next) if tok == token_type]
-        if not filtered_masks:
-            return None
-        reprs = torch.stack([x[0, mask][-1] for mask in filtered_masks])
-        return decoder.generate(reprs)
+    def _process_higher_level_tokens(self, x, group, batch_data, l_next):
 
-    def _process_higher_level_tokens(self, x: torch.Tensor, masks: torch.Tensor, batch_indices: list, timestamps: torch.Tensor, batch_data: HierTraj, l_next: int):
+        batch_indices, masks, timestamps, toks_next = zip(*group)
         
         reprs = torch.stack([x[0, mask][-1] for mask in masks])
         tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
         
         for b, timestamp in zip(batch_indices, timestamps):
             batch_data.insert_next_token(b, tokens[b], l_next, timestamp)
+
+
+    def _hiearchical_generate(self, x, batch_data, trajectories):
+
+        level_groups = self._group_by_next_level(batch_data)
+        
+        for l_next, group in level_groups.items(): 
+            if l_next == 0: 
+                self._process_zero_level_tokens(x, group, batch_data, trajectories)
+            else: 
+                self._process_higher_level_tokens(x, group, batch_data, l_next)
+
+        return batch_data, trajectories
 
 
 
