@@ -424,7 +424,7 @@ class DAT(nn.Module):
 
         return loss
 
-    
+    # TBD: trajectory without action & reward needs to be handled by this function, currently it's not supported
     def generate(self, batch_data: HierSeq, trajectories: list):
         """
         Note: trajectories w/o reward is newly generated
@@ -461,9 +461,8 @@ class DAT(nn.Module):
 
         return batch_data, trajectories 
 
-    # TBD : verify this 
     def act(self, batch_data: HierSeq, trajectories: list): 
-        
+
         new_action = self._get_new_action(trajectories)      
         while not new_action: 
             batch_data, trajectories = self.generate(batch_data, trajectories)

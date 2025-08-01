@@ -1,7 +1,9 @@
 import torch 
 import numpy 
 from typing import Union 
-
+from utils import HierTraj
+from model import DAT
+from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 
 # --------------------------------------------------------------------------------------------------------------------------
 # Helper functions
@@ -13,7 +15,7 @@ def _init_trajectory(obs: Union[numpy.array, torch.Tensor], device="cuda"):
     empty_tensor = torch.empty(0).to(device)
     obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device) if isinstance(obs, numpy.ndarray) else obs
     states.append(obs_tensor) # initial state    
-    trajectory = (torch.stack(states).to(device), empty_tensor, empty_tensor)
+    trajectory = (torch.stack(states).to(device), None, None)
     trajectories.append(trajectory)
     return trajectories
 
@@ -32,13 +34,12 @@ class HiearchicalAgent:
         self.trajectory = _init_trajectory(init_obs, device=device)
 
     def act(self, epsilon: float): 
-        
+        # TBD: missing random action selection logic & epsilon-greedy logic
         pairs = self.dat.act(self.state, self.trajectory)
         assert len(pairs) == 1, "Only one sample is supported for now -- unless we figure out how to parallelize environment & load from state"
         _, action_idx = pairs[0]
-        obs, reward = self.env.step(action_idx.item())
-        return obs, action, reward # just as remark, causal order is action->state->reward
-        
+        return action_idx
+    
     def update(self, obs, action, reward): 
 
         ts = self.state.timestamps[self.state.sample_idx == 0][-1]
