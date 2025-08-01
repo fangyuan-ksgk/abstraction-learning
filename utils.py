@@ -171,7 +171,7 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
-    def insert_next_token(self, sample_idx: int, next_token: torch.Tensor, next_level: int, next_timestamp: int):
+    def insert_next_token(self, sample_idx: int, next_token: Union[torch.Tensor, int], next_level: int, next_timestamp: int):
         """
         Insert next token for a specific sample at the end of that sample's sequence (in-place)
         """
