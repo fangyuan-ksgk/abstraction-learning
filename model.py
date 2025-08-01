@@ -461,6 +461,25 @@ class DAT(nn.Module):
 
         return batch_data, trajectories 
 
+    # TBD : verify this 
+    def act(self, batch_data: HierSeq, trajectories: list): 
+        
+        new_action = self._get_new_action(trajectories)      
+        while not new_action: 
+            batch_data, trajectories = self.generate(batch_data, trajectories)
+            new_action = self._get_new_action(trajectories)
+
+        return new_action
+        
+    def _get_new_action(self, trajectories: list) -> list:
+        pairs = [] # (sample_idx, action_idx)
+        for b, trajectory in enumerate(trajectories):
+            _, action, reward = trajectory
+            n_new_action = action.size(0) - reward.size(0)
+            if n_new_action > 0:
+                new_action = action[-n_new_action:]
+                pairs.append((b, new_action))
+        return pairs
 
     def _embd_trajectory(self, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
         """ 

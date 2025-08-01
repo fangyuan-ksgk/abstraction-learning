@@ -97,10 +97,16 @@ class HierSeq:
     @staticmethod
     def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
         """Flatten a single hierarchical sample by timestamp ordering."""
-        # Generate default timestamps if None
+    
         if timestamp_sequences is None:
             timestamp_sequences = []
-            for level in range(L):
+
+            tokens = token_sequences[0]
+            if isinstance(tokens, list): tokens = torch.tensor(tokens)
+            l0_timestamp = torch.cumsum(tokens==PLACE_HOLDER_ACTION_TOK, dim=0)
+            timestamp_sequences.append(l0_timestamp)
+
+            for level in range(1, L):
                 tokens = token_sequences[level]
                 if torch.is_tensor(tokens):
                     seq_len = tokens.size(0)
