@@ -428,6 +428,8 @@ class ActionEncoder(nn.Module): # arguably exactly the same as WTE
         self.wte = nn.Embedding(action_size, feature_dim)
     
     def forward(self, x):
+        if x is None: 
+            return None
         return self.wte(x)
 
 

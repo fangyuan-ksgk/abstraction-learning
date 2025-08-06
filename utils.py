@@ -445,10 +445,10 @@ def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: 
 
     if current_level == 0: 
         
-        mask = torch.logical_and(levels >= current_level, timestamps >= current_time - 2*K + 1)
+        mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K + 1)
         flip_tokens = torch.flip(tokens[mask], dims=[0])
         is_complete = torch.cat([flip_tokens[1::2] == PLACE_HOLDER_ACTION_TOK, flip_tokens[::2] == PLACE_HOLDER_STATE_TOK]).all()
-        is_enough = torch.flip(timestamps[mask], dims=[0])[1::2][-1] == (current_time - K + 1)
+        is_enough = current_time - K + 1 >= 0
         do_plan = all(levels[mask] == current_level) & is_complete & is_enough
 
         if do_plan: 
@@ -463,7 +463,7 @@ def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: 
                 raise ValueError(f"Invalid 0th level token: {current_token}")
     else: 
         mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
-        is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1)
+        is_enough = current_time - K**(current_level + 1) + 1 >= 0
         do_plan = all(levels[mask] == current_level)
         if do_plan: 
             return make_return(current_level + 1, 0)

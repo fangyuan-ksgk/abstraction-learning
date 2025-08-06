@@ -29,7 +29,7 @@ class HiearchicalAgent:
     def __init__(self, dat: DAT, init_obs: Union[numpy.array, torch.Tensor], device="cuda"): 
 
         self.dat = dat
-        sample = ([[PLACE_HOLDER_ACTION_TOK] if l == 0 else [] for l in range(self.dat.L)], None)
+        sample = ([[PLACE_HOLDER_STATE_TOK] if l == 0 else [] for l in range(self.dat.L)], None)
         self.state = HierTraj.from_hierarchical_data([sample], K=self.dat.K, L=self.dat.L)
         self.trajectory = _init_trajectory(init_obs, device=device)
 

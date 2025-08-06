@@ -424,7 +424,6 @@ class DAT(nn.Module):
 
         return loss
 
-    # TBD: trajectory without action & reward needs to be handled by this function, currently it's not supported
     def generate(self, batch_data: HierSeq, trajectories: list):
         """
         Note: trajectories w/o reward is newly generated
@@ -474,7 +473,9 @@ class DAT(nn.Module):
         pairs = [] # (sample_idx, action_idx)
         for b, trajectory in enumerate(trajectories):
             _, action, reward = trajectory
-            n_new_action = action.size(0) - reward.size(0)
+            action_size = action.size(0) if action is not None else 0
+            reward_size = reward.size(0) if reward is not None else 0
+            n_new_action = action_size - reward_size
             if n_new_action > 0:
                 new_action = action[-n_new_action:]
                 pairs.append((b, new_action))
@@ -489,7 +490,7 @@ class DAT(nn.Module):
 
             s_embd = self.state_encoder(trajectory[0])
             a_embd = self.action_encoder(trajectory[1])
-            n_state, n_act = s_embd.shape[0], a_embd.shape[0]
+            n_state, n_act = s_embd.shape[0], a_embd.shape[0] if a_embd is not None else 0
 
             sample_l0_mask = torch.logical_and(batch_data.levels == 0, batch_data.sample_idx == b)
             first_tok = batch_data.tokens[sample_l0_mask][0].item()
@@ -599,11 +600,13 @@ class DAT(nn.Module):
         i_a = i_s = 0
         for b in batch_indices: 
             if toks_next[b] == PLACE_HOLDER_ACTION_TOK: 
-                trajectories[b] = (trajectories[b][0], torch.cat([trajectories[b][1], actions[i_a:i_a+1]]), trajectories[b][2])
+                new_action = actions[i_a:i_a + 1] if trajectories[b][1] is None else torch.cat([trajectories[b][1], actions[i_a:i_a+1]])
+                trajectories[b] = (trajectories[b][0], new_action, trajectories[b][2])
                 batch_data.insert_next_token(b, PLACE_HOLDER_ACTION_TOK, 0, timestamps[b])
                 i_a += 1
             elif toks_next[b] == PLACE_HOLDER_STATE_TOK: 
-                trajectories[b] = (torch.cat([trajectories[b][0], states[i_s:i_s+1]]), trajectories[b][1], trajectories[b][2])
+                new_state = states[i_s:i_s + 1] if trajectories[b][0] is None else torch.cat([trajectories[b][0], states[i_s:i_s+1]])
+                trajectories[b] = (new_state, trajectories[b][1], trajectories[b][2])
                 batch_data.insert_next_token(b, PLACE_HOLDER_STATE_TOK, 0, timestamps[b])
                 i_s += 1
             else: 
