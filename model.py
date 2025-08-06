@@ -13,7 +13,8 @@ from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 from utils import (
     get_next_token_level, HierSeq, HierTraj, create_loss_mask,
-    make_interleave_embd, create_traj_loss_mask, get_next_traj_token
+    make_interleave_embd, create_traj_loss_mask, get_next_traj_token,
+    _build_interleave_embd
 )
 
 
@@ -462,8 +463,8 @@ class DAT(nn.Module):
 
     def act(self, batch_data: HierSeq, trajectories: list): 
 
-        new_action = self._get_new_action(trajectories)      
-        while not new_action: 
+        new_action = self._get_new_action(trajectories) 
+        while not new_action:   
             batch_data, trajectories = self.generate(batch_data, trajectories)
             new_action = self._get_new_action(trajectories)
 
@@ -490,19 +491,12 @@ class DAT(nn.Module):
 
             s_embd = self.state_encoder(trajectory[0])
             a_embd = self.action_encoder(trajectory[1])
-            n_state, n_act = s_embd.shape[0], a_embd.shape[0] if a_embd is not None else 0
 
             sample_l0_mask = torch.logical_and(batch_data.levels == 0, batch_data.sample_idx == b)
             first_tok = batch_data.tokens[sample_l0_mask][0].item()
             ft_act = first_tok == PLACE_HOLDER_ACTION_TOK
 
-            if ft_act: 
-                assert n_state <= n_act <= n_state + 1, "Missing action or state token"
-                traj_embd = torch.stack([a_embd[i//2] if i % 2 == 0 else s_embd[i//2] for i in range(2*n_act)], dim=0)
-            else: 
-                assert n_act <= n_state <= n_act + 1, "Missing action or state token"
-                traj_embd = torch.stack([s_embd[i//2] if i % 2 == 0 else a_embd[i//2] for i in range(2*n_state-1)], dim=0)
-
+            traj_embd = _build_interleave_embd(s_embd, a_embd, ft_act)
             embds.append(traj_embd)
 
         return torch.cat(embds, dim=0).unsqueeze(0)                
@@ -587,7 +581,8 @@ class DAT(nn.Module):
         filtered_masks = [mask for mask, tok in zip(masks, toks_next) if tok == token_type]
         if not filtered_masks:
             return None
-        reprs = torch.stack([x[0, mask][-1] for mask in filtered_masks])
+        x_len = x.shape[1]
+        reprs = torch.stack([x[0, mask[:x_len]][-1] for mask in filtered_masks])
         return decoder.generate(reprs)
         
     def _process_zero_level_tokens(self, x, group, batch_data, trajectories):
@@ -627,6 +622,10 @@ class DAT(nn.Module):
 
         level_groups = self._group_by_next_level(batch_data)
         
+        # (TBD). I think I know the issue here: 
+        # - in-place update of 'batch_data' & 'trajectories' mean the 'x.shape[1]' is no longer the same as 'batch_data.tokens.shape[0]'
+        #   after first iteration, so we'd better make the implementation compatible (in the sense that we'd slice the batch_data according to x.shape[1])
+
         for l_next, group in level_groups.items(): 
             if l_next == 0: 
                 self._process_zero_level_tokens(x, group, batch_data, trajectories)

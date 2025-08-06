@@ -468,8 +468,30 @@ def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: 
         if do_plan: 
             return make_return(current_level + 1, 0)
         else: 
-            return make_return(0, 1)
+            return make_return(0, 1, PLACE_HOLDER_ACTION_TOK)
 
+
+def _build_interleave_embd(s_embd, a_embd, ft_act): 
+
+    n_state, n_act = s_embd.shape[0], a_embd.shape[0] if a_embd is not None else 0
+
+    if ft_act: 
+        assert n_state <= n_act <= n_state + 1, "Missing action or state token"
+        traj_embd_list = [] 
+        for i in range(n_act): 
+            traj_embd_list.append(a_embd[i])
+            if i < n_state: 
+                traj_embd_list.append(s_embd[i])
+    else: 
+        assert n_act <= n_state <= n_act + 1, "Missing action or state token"
+        traj_embd_list = [] 
+        for i in range(n_state): 
+            traj_embd_list.append(s_embd[i])
+            if i < n_act: 
+                traj_embd_list.append(a_embd[i])
+
+    traj_embd = torch.stack(traj_embd_list, dim=0) 
+    return traj_embd
 
 
 # Sanity check functions
