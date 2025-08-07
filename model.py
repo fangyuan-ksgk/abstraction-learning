@@ -331,7 +331,10 @@ class GAT(nn.Module):
 
         return total_loss / total_weight
 
-
+    # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
+    #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 
+    #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
+    
     def _hierachical_generate(self, x: torch.Tensor, batch_data: HierSeq):
 
         level_groups = self._group_by_next_level(batch_data)
@@ -339,7 +342,7 @@ class GAT(nn.Module):
         for l_next, group in level_groups.items(): 
             batch_indices, masks, timestamps = zip(*group)
             reprs = torch.stack([x[0, mask][-1] for mask in masks])
-            next_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
+            next_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next](reprs) / 30), dim=-1)
             for i, b in enumerate(batch_indices): 
                 batch_data.insert_next_token(b, next_tokens[i], l_next, timestamps[i])
         

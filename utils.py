@@ -591,16 +591,15 @@ def test_gat_gen_order(gat, L=3, K=2, n_gen=20):
         time.sleep(0.5)
 
 
-def test_dat_gen_order(dat, L=3, K=2, n_gen=20): 
-
-    sample = [[PLACE_HOLDER_STATE_TOK] if level == 0 else [] for level in range(L)]
-    batch_data = HierTraj.from_hierarchical_data([(sample, None)], K, L)
+def test_dat_gen_order(dat, env, L=3, K=2, n_gen=20): 
+    from agent import _init_trajectory
+    init_obs = env.reset()
+    batch_data, trajectories = _init_trajectory(init_obs, K=dat.K, L=dat.L, device="cpu")
 
     for _ in range(n_gen): 
-        dat.generate(batch_data) 
-        stream_print_htraj(batch_data)
+        dat.generate(batch_data, trajectories) 
+        stream_print_htraj(batch_data, clear=True)
         time.sleep(0.5)
-
 
 
 
