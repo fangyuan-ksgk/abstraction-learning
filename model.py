@@ -599,12 +599,12 @@ class DAT(nn.Module):
             if toks_next[i] == PLACE_HOLDER_ACTION_TOK: 
                 new_action = actions[i_a:i_a + 1] if trajectories[b][1] is None else torch.cat([trajectories[b][1], actions[i_a:i_a+1]])
                 trajectories[b] = (trajectories[b][0], new_action, trajectories[b][2])
-                batch_data.insert_next_token(b, PLACE_HOLDER_ACTION_TOK, 0, timestamps[b])
+                batch_data.insert_next_token(b, PLACE_HOLDER_ACTION_TOK, 0, timestamps[i])
                 i_a += 1
             elif toks_next[i] == PLACE_HOLDER_STATE_TOK: 
                 new_state = states[i_s:i_s + 1] if trajectories[b][0] is None else torch.cat([trajectories[b][0], states[i_s:i_s+1]])
                 trajectories[b] = (new_state, trajectories[b][1], trajectories[b][2])
-                batch_data.insert_next_token(b, PLACE_HOLDER_STATE_TOK, 0, timestamps[b])
+                batch_data.insert_next_token(b, PLACE_HOLDER_STATE_TOK, 0, timestamps[i])
                 i_s += 1
             else: 
                 raise ValueError(f"Invalid token: {toks_next[i]}")
