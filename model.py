@@ -616,12 +616,11 @@ class DAT(nn.Module):
         reprs = torch.stack([x[0, mask][-1] for mask in masks])
         tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
         
-        for b, timestamp in zip(batch_indices, timestamps):
-            batch_data.insert_next_token(b, tokens[b], l_next, timestamp)
+        for i, b in enumerate(batch_indices): 
+            batch_data.insert_next_token(b, tokens[i], l_next, timestamps[i])
 
 
     def _hiearchical_generate(self, x, batch_data, trajectories):
-        # (TBD #1) Update 'action_mask' & 'state_mask' for batch_data --> fixed on 'HierTraj.insert_next_token' method
 
         level_groups = self._group_by_next_level(batch_data)
         
