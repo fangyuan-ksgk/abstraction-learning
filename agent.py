@@ -9,7 +9,12 @@ from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 # Helper functions
 # --------------------------------------------------------------------------------------------------------------------------
 
-def _init_trajectory(obs: Union[numpy.array, torch.Tensor], device="cuda"):
+
+def _init_trajectory(obs: Union[numpy.array, torch.Tensor], K: int, L: int, device="cuda"):
+
+    sample = ([[PLACE_HOLDER_STATE_TOK] if l == 0 else [] for l in range(L)], None)
+    state = HierTraj.from_hierarchical_data([sample], K=K, L=L)
+
     trajectories = []
     states = []
     empty_tensor = torch.empty(0).to(device)
@@ -17,7 +22,8 @@ def _init_trajectory(obs: Union[numpy.array, torch.Tensor], device="cuda"):
     states.append(obs_tensor) # initial state    
     trajectory = (torch.stack(states).to(device), None, None)
     trajectories.append(trajectory)
-    return trajectories
+
+    return state, trajectories
 
 
 # --------------------------------------------------------------------------------------------------------------------------
@@ -27,11 +33,8 @@ def _init_trajectory(obs: Union[numpy.array, torch.Tensor], device="cuda"):
 class HiearchicalAgent: 
 
     def __init__(self, dat: DAT, init_obs: Union[numpy.array, torch.Tensor], device="cuda"): 
-
         self.dat = dat
-        sample = ([[PLACE_HOLDER_STATE_TOK] if l == 0 else [] for l in range(self.dat.L)], None)
-        self.state = HierTraj.from_hierarchical_data([sample], K=self.dat.K, L=self.dat.L)
-        self.trajectory = _init_trajectory(init_obs, device=device)
+        self.state, self.trajectory = _init_trajectory(init_obs, K=self.dat.K, L=self.dat.L, device=device)
 
     def act(self, epsilon: float): 
         # TBD: missing random action selection logic & epsilon-greedy logic

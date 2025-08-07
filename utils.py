@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Union
 import torch
 from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
+from IPython.display import clear_output
 
 
 # Generation Helper functions: Decide the next token level & timestamp to generate 
@@ -436,6 +437,7 @@ def create_traj_loss_mask(batch_data: HierTraj):
     return create_loss_mask(sample_idx)[1:], loss_mask_state, loss_mask_action
 
 
+
 def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: torch.Tensor, K: int, L: int): 
 
     current_level = levels[-1]
@@ -471,7 +473,7 @@ def get_next_traj_token(levels: torch.Tensor, timestamps: torch.Tensor, tokens: 
     else: 
         mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
         is_enough = current_time - K**(current_level + 1) + 1 >= 0
-        do_plan = all(levels[mask] == current_level)
+        do_plan = all(levels[mask] == current_level) & is_enough
         if do_plan: 
             return make_return(current_level + 1, 0)
         else: 
@@ -505,18 +507,18 @@ def _build_interleave_embd(s_embd, a_embd, ft_act):
 # --------------------------------------------------------------------------------------------------------------------------
 
 def data_sanity_check(batch_data, trajectories): 
-    d_len = sum([t[0].size(0)+t[1].size(0) for t in trajectories])
+    d_len = sum([(t[0].size(0) if t[0] is not None else 0) + (t[1].size(0) if t[1] is not None else 0) for t in trajectories])
     t_len = sum(batch_data.levels == 0)
     assert d_len == t_len, f"Batch data token length mismatch with trajecotories: {d_len} != {t_len}"
     print(f"Sanity check passed: total {t_len} 0-th level tokens (state & action)")
 
     n_state_data = sum(batch_data.state_mask).item()
-    n_state_traj = sum([t[0].size(0) for t in trajectories])
+    n_state_traj = sum([(t[0].size(0) if t[0] is not None else 0) for t in trajectories])
     assert n_state_data == n_state_traj, f"State data & trajectory mismatch: {n_state_data} != {n_state_traj}"
     print(f"Sanity check passed: {n_state_data} state tokens in data, {n_state_traj} state tokens in trajectories")
 
     n_act_data = sum(batch_data.action_mask).item()
-    n_act_traj = sum([t[1].size(0) for t in trajectories])
+    n_act_traj = sum([(t[1].size(0) if t[1] is not None else 0) for t in trajectories])
     assert n_act_data == n_act_traj, f"Action data & trajectory mismatch: {n_act_data} != {n_act_traj}"
     print(f"Sanity check passed: {n_act_data} action tokens in data, {n_act_traj} action tokens in trajectories")
 
@@ -528,5 +530,60 @@ def data_sanity_check(batch_data, trajectories):
     assert batch_data.timestamps.size(0) == tok_len, f"Timestamps length mismatch: {batch_data.timestamps.size(0)} != {tok_len}"
     print(f"Sanity check passed: {tok_len} (action/state/abstract) tokens in data")
     return 
+
+
+def stream_print_hierarchy(batch_data, clear=True):
+    
+    if clear:
+        clear_output(wait=True)
+    
+    tokens = batch_data.tokens.tolist() if hasattr(batch_data.tokens, 'tolist') else batch_data.tokens
+    levels = batch_data.levels.tolist() if hasattr(batch_data.levels, 'tolist') else batch_data.levels
+    timestamps = batch_data.timestamps.tolist() if hasattr(batch_data.timestamps, 'tolist') else batch_data.timestamps
+    
+    if len(tokens) == 0:
+        print("No tokens to display")
+        return
+    
+    max_level = max(levels)
+    max_timestamp = max(timestamps)
+    
+    display = []
+    for level in range(max_level, 0, -1):  # Higher levels (2, 1)
+        row = ['     '] * (max_timestamp + 1)  # 5 spaces to match "[s] " width
+        display.append(row)
+    
+    state_row = ['     '] * (max_timestamp + 1)
+    action_row = ['     '] * (max_timestamp + 1)
+    display.append(state_row)
+    display.append(action_row)
+    
+    for i, (tok, lvl, ts) in enumerate(zip(tokens, levels, timestamps)):
+        if lvl == 0:
+            if tok == PLACE_HOLDER_STATE_TOK or (hasattr(batch_data, 'state_mask') and batch_data.state_mask[i]):
+                state_row[ts] = '[s]  '
+            elif tok == PLACE_HOLDER_ACTION_TOK or (hasattr(batch_data, 'action_mask') and batch_data.action_mask[i]):
+                action_row[ts] = '[a]  '
+        else:
+            row_idx = max_level - lvl
+            display[row_idx][ts] = '[t]  '
+    
+    print("\n" + "="*55)
+    print("Hierarchical Token Stream (aligned by timestamp):")
+    print("-"*55)
+    
+    for level in range(max_level, 0, -1):
+        row_idx = max_level - level
+        level_str = ''.join(display[row_idx])
+        print(f"Level {level}:  {level_str}")
+    
+    state_str = ''.join(state_row)
+    action_str = ''.join(action_row)
+    print(f"L0-State: {state_str}")
+    print(f"L0-Action:{action_str}")
+    
+    print("="*55)
+    print(f"Total tokens: {len(tokens)}, Max timestamp: {max_timestamp}")
+    print()
 
 

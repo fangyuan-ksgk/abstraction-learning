@@ -567,8 +567,7 @@ class DAT(nn.Module):
                     total_weight += self.level_weights[l]
         
         return total_loss / total_weight
-
-    
+ 
     def _group_by_next_level(self, batch_data):
         level_groups = defaultdict(list) 
         for b in range(batch_data.batch_size): 
