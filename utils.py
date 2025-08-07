@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional, Union
-import torch
+import torch, random, time
 from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 from IPython.display import clear_output
 
@@ -22,7 +22,7 @@ def get_next_token_level(levels, timestamps, K, L):
         return make_return(0, 1)
 
     mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
-    is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1) # this is wrong (!) - we need to validate this, too 
+    is_enough = current_time - K**(current_level + 1) + 1 >= 1 # HierSeq timestamps starts from 1
     do_plan = all(levels[mask] == current_level) & is_enough
 
     if do_plan: 
@@ -96,9 +96,6 @@ class HierSeq:
         )
     
 
-    # TBD: - logic is flawed here, and not just for HierSeq, but also for HierTraj
-    #      -> ver. here seems to be a intemediate logic semi-built for HierTraj not for HierSeq. 
-    #      -> for HierTraj ver. assumes static init_state which could be violated in practice -- it's better to use cumsum(tok == ACTION_TOK) instead
     @staticmethod
     def _flatten_single_sample(token_sequences: list, timestamp_sequences: Optional[list], K: int, L: int):
         """Flatten a single hierarchical sample by timestamp ordering."""
@@ -107,12 +104,7 @@ class HierSeq:
             timestamp_sequences = []
             for level in range(L):
                 tokens = token_sequences[level]
-                if torch.is_tensor(tokens):
-                    seq_len = tokens.size(0)
-                    tokens = tokens.tolist()
-                else:
-                    seq_len = len(tokens)
-                
+                seq_len = len(tokens)
                 gap = K ** level
                 timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
             
@@ -270,23 +262,22 @@ class HierTraj:
     def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
         """Flatten a single hierarchical trajectory by timestamp ordering."""
 
-        if timestamp_sequences is None:
-            timestamp_sequences = []
+        timestamp_sequences = []
 
-            for level in range(L):
-                tokens = token_sequences[level]
-                if torch.is_tensor(tokens):
-                    seq_len = tokens.size(0)
-                    tokens = tokens.tolist()
-                else:
-                    seq_len = len(tokens)
+        for level in range(L):
+            tokens = token_sequences[level]
+            if torch.is_tensor(tokens):
+                seq_len = tokens.size(0)
+            else:
+                seq_len = len(tokens)
+                tokens = torch.tensor(tokens)
 
-                if level == 0: 
-                    timestamp_l0 = torch.cumsum(tokens==PLACE_HOLDER_ACTION_TOK, dim=0)
-                    timestamp_sequences.append(timestamp_l0)
-                else: 
-                    gap = K ** level
-                    timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
+            if level == 0: 
+                timestamp_l0 = torch.cumsum(tokens==PLACE_HOLDER_ACTION_TOK, dim=0)
+                timestamp_sequences.append(timestamp_l0)
+            else: 
+                gap = K ** level
+                timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
             
         items = []
         for level in range(L):
@@ -531,8 +522,137 @@ def data_sanity_check(batch_data, trajectories):
     print(f"Sanity check passed: {tok_len} (action/state/abstract) tokens in data")
     return 
 
+# Sanity check on 'HierSeq' & 'HierTraj' initialization
 
-def stream_print_hierarchy(batch_data, clear=True):
+def test_hseq_htraj_init(K=2, L=3): 
+
+    # (I). HierSeq init
+    token_sequences = []
+    
+
+    n_tokens_highest = random.randint(2, 5)  # Highest level has fewest tokens
+    
+    for level in range(L-1, -1, -1):  # Go from L-1 down to 0
+        if level == L-1:
+            n_tokens = n_tokens_highest
+        else:
+            prev_n_tokens = len(token_sequences[0])  # Get count from previously added level
+            expected = K * prev_n_tokens
+            min_tokens = max(1, int(expected * 0.8))
+            max_tokens = int(expected * 1.2)
+            n_tokens = random.randint(min_tokens, max_tokens)
+        
+        token_sequences.insert(0, [random.randint(0, 9) for _ in range(n_tokens)])
+    
+    hseq = HierSeq.from_hierarchical_data([(token_sequences, None)], K, L)
+    stream_print_hseq(hseq, clear=False)
+
+    # (II). HierTraj init
+    traj_sequences = []
+    
+    n_tokens_highest = random.randint(1, 4)
+    
+    for level in range(L-1, 0, -1):
+        if level == L-1:
+            n_tokens = n_tokens_highest
+        else:
+            prev_n_tokens = len(traj_sequences[0])
+            expected = K * prev_n_tokens
+            min_tokens = max(1, int(expected * 0.8))
+            max_tokens = int(expected * 1.2)
+            n_tokens = random.randint(min_tokens, max_tokens)
+        
+        traj_sequences.insert(0, [random.randint(0, 9) for _ in range(n_tokens)])
+
+    if L > 1:
+        expected_actions = K * len(traj_sequences[0])
+        min_actions = max(2, int(expected_actions * 0.8))
+        max_actions = int(expected_actions * 1.2)
+        n_actions = random.randint(min_actions, max_actions)
+    else:
+        n_actions = random.randint(5, 12)
+    
+    traj_sequences.insert(0,
+        [PLACE_HOLDER_STATE_TOK] + [PLACE_HOLDER_ACTION_TOK, PLACE_HOLDER_STATE_TOK] * n_actions
+    )
+    
+    htraj = HierTraj.from_hierarchical_data([(traj_sequences, None)], K, L)
+    stream_print_htraj(htraj, clear=False)
+
+
+def test_gat_gen_order(gat, L=3, K=2, n_gen=20):
+
+    sample = [[1] if level == 0 else [] for level in range(L)]
+    batch_data = HierSeq.from_hierarchical_data([(sample, None)], K, L)
+
+    for _ in range(n_gen): 
+        gat.generate(batch_data)
+        stream_print_hseq(batch_data)
+        time.sleep(0.5)
+
+
+def test_dat_gen_order(dat, L=3, K=2, n_gen=20): 
+
+    sample = [[PLACE_HOLDER_STATE_TOK] if level == 0 else [] for level in range(L)]
+    batch_data = HierTraj.from_hierarchical_data([(sample, None)], K, L)
+
+    for _ in range(n_gen): 
+        dat.generate(batch_data) 
+        stream_print_htraj(batch_data)
+        time.sleep(0.5)
+
+
+
+
+# Visualization functions
+# --------------------------------------------------------------------------------------------------------------------------
+def stream_print_hseq(batch_data: HierSeq, clear=True):
+    
+    if clear:
+        clear_output(wait=True)
+    
+    tokens = batch_data.tokens.tolist() if hasattr(batch_data.tokens, 'tolist') else batch_data.tokens
+    levels = batch_data.levels.tolist() if hasattr(batch_data.levels, 'tolist') else batch_data.levels
+    timestamps = batch_data.timestamps.tolist() if hasattr(batch_data.timestamps, 'tolist') else batch_data.timestamps
+    
+    if len(tokens) == 0:
+        print("No tokens to display")
+        return
+    
+    max_level = max(levels) if levels else 0
+    max_timestamp = max(timestamps) if timestamps else 0
+    
+    column_widths = [0] * (max_timestamp + 1)
+    
+    for tok, lvl, ts in zip(tokens, levels, timestamps):
+        tok_str = f"[{tok}]"
+        column_widths[ts] = max(column_widths[ts], len(tok_str))
+    
+    column_widths = [max(w, 3) + 1 for w in column_widths]  # min 3 chars + 1 space
+    
+    display = []
+    for level in range(max_level + 1):
+        row = [' ' * w for w in column_widths]  # Initialize with spaces
+        display.append(row)
+    
+    for tok, lvl, ts in zip(tokens, levels, timestamps):
+        tok_str = f"[{tok}]"
+        display[lvl][ts] = tok_str.ljust(column_widths[ts])
+    
+    print("\n" + "="*55)
+    print(f"Hierarchical Sequence K={batch_data.K} L={batch_data.L} (aligned by timestamp):")
+    print("-"*55)
+    
+    for level in range(max_level, -1, -1):
+        level_str = ''.join(display[level])
+        print(f"Level {level}: {level_str}")
+    
+    print("="*55)
+    print(f"Total tokens: {len(tokens)}, Max timestamp: {max_timestamp}")
+    print()
+
+
+def stream_print_htraj(batch_data: HierTraj, clear=True):
     
     if clear:
         clear_output(wait=True)
@@ -548,28 +668,48 @@ def stream_print_hierarchy(batch_data, clear=True):
     max_level = max(levels)
     max_timestamp = max(timestamps)
     
-    display = []
-    for level in range(max_level, 0, -1):  # Higher levels (2, 1)
-        row = ['     '] * (max_timestamp + 1)  # 5 spaces to match "[s] " width
-        display.append(row)
-    
-    state_row = ['     '] * (max_timestamp + 1)
-    action_row = ['     '] * (max_timestamp + 1)
-    display.append(state_row)
-    display.append(action_row)
+    # First pass: determine the maximum width needed for each timestamp column
+    column_widths = [0] * (max_timestamp + 1)
     
     for i, (tok, lvl, ts) in enumerate(zip(tokens, levels, timestamps)):
         if lvl == 0:
+            # For level 0, we show [s] or [a]
+            tok_str = '[s]' if (tok == PLACE_HOLDER_STATE_TOK or 
+                               (hasattr(batch_data, 'state_mask') and batch_data.state_mask[i])) else '[a]'
+        else:
+            # For higher levels, show the actual token index
+            tok_str = f'[{tok}]'
+        
+        column_widths[ts] = max(column_widths[ts], len(tok_str))
+    
+    # Add minimum spacing between columns (at least 1 space)
+    column_widths = [max(w, 3) + 1 for w in column_widths]  # min 3 chars + 1 space
+    
+    # Create display grid
+    display = []
+    for level in range(max_level, 0, -1):  # Higher levels (2, 1)
+        row = [' ' * w for w in column_widths]
+        display.append(row)
+    
+    state_row = [' ' * w for w in column_widths]
+    action_row = [' ' * w for w in column_widths]
+    display.append(state_row)
+    display.append(action_row)
+    
+    # Place tokens in the grid
+    for i, (tok, lvl, ts) in enumerate(zip(tokens, levels, timestamps)):
+        if lvl == 0:
             if tok == PLACE_HOLDER_STATE_TOK or (hasattr(batch_data, 'state_mask') and batch_data.state_mask[i]):
-                state_row[ts] = '[s]  '
+                state_row[ts] = '[s]'.ljust(column_widths[ts])
             elif tok == PLACE_HOLDER_ACTION_TOK or (hasattr(batch_data, 'action_mask') and batch_data.action_mask[i]):
-                action_row[ts] = '[a]  '
+                action_row[ts] = '[a]'.ljust(column_widths[ts])
         else:
             row_idx = max_level - lvl
-            display[row_idx][ts] = '[t]  '
+            tok_str = f'[{tok}]'
+            display[row_idx][ts] = tok_str.ljust(column_widths[ts])
     
     print("\n" + "="*55)
-    print("Hierarchical Token Stream (aligned by timestamp):")
+    print(f"Hierarchical Trajectory K={batch_data.K} L={batch_data.L} (aligned by timestamp):")
     print("-"*55)
     
     for level in range(max_level, 0, -1):
