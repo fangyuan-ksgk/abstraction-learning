@@ -390,17 +390,24 @@ class HierTraj:
         ]) 
 
         if next_token.item() == PLACE_HOLDER_STATE_TOK:
-            self.state_mask = torch.cat([
-                self.state_mask[:insert_pos],
-                torch.tensor([True]),
+            state_mask_item = torch.tensor([True])
+        else: 
+            state_mask_item = torch.tensor([False])
+        self.state_mask = torch.cat([
+            self.state_mask[:insert_pos],
+            state_mask_item,
                 self.state_mask[insert_pos:]
             ])
-        elif next_token.item() == PLACE_HOLDER_ACTION_TOK: 
-            self.action_mask = torch.cat([
-                self.action_mask[:insert_pos],
-                torch.tensor([True]),
-                self.action_mask[insert_pos:]
-            ])
+
+        if next_token.item() == PLACE_HOLDER_ACTION_TOK: 
+            action_mask_item = torch.tensor([True])
+        else: 
+            action_mask_item = torch.tensor([False])
+        self.action_mask = torch.cat([
+            self.action_mask[:insert_pos],
+            action_mask_item,
+            self.action_mask[insert_pos:]
+        ])
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -513,6 +520,13 @@ def data_sanity_check(batch_data, trajectories):
     assert n_act_data == n_act_traj, f"Action data & trajectory mismatch: {n_act_data} != {n_act_traj}"
     print(f"Sanity check passed: {n_act_data} action tokens in data, {n_act_traj} action tokens in trajectories")
 
+    tok_len = batch_data.tokens.size(0)
+    assert batch_data.action_mask.size(0) == tok_len, f"Action mask length mismatch: {batch_data.action_mask.size(0)} != {tok_len}"
+    assert batch_data.state_mask.size(0) == tok_len, f"State mask length mismatch: {batch_data.state_mask.size(0)} != {tok_len}"
+    assert batch_data.levels.size(0) == tok_len, f"Levels length mismatch: {batch_data.levels.size(0)} != {tok_len}"
+    assert batch_data.sample_idx.size(0) == tok_len, f"Sample index length mismatch: {batch_data.sample_idx.size(0)} != {tok_len}"
+    assert batch_data.timestamps.size(0) == tok_len, f"Timestamps length mismatch: {batch_data.timestamps.size(0)} != {tok_len}"
+    print(f"Sanity check passed: {tok_len} (action/state/abstract) tokens in data")
     return 
 
 

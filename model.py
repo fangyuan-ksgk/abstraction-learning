@@ -532,6 +532,8 @@ class DAT(nn.Module):
 
 
     def _compute_htraj_loss(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
+        # (TBD). When trajectory contains 'un-grounded' action tokens, I encounter error here
+        #        specifically, 
    
         action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
         state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
@@ -619,13 +621,10 @@ class DAT(nn.Module):
 
 
     def _hiearchical_generate(self, x, batch_data, trajectories):
+        # (TBD #1) Update 'action_mask' & 'state_mask' for batch_data --> fixed on 'HierTraj.insert_next_token' method
 
         level_groups = self._group_by_next_level(batch_data)
         
-        # (TBD). I think I know the issue here: 
-        # - in-place update of 'batch_data' & 'trajectories' mean the 'x.shape[1]' is no longer the same as 'batch_data.tokens.shape[0]'
-        #   after first iteration, so we'd better make the implementation compatible (in the sense that we'd slice the batch_data according to x.shape[1])
-
         for l_next, group in level_groups.items(): 
             if l_next == 0: 
                 self._process_zero_level_tokens(x, group, batch_data, trajectories)
