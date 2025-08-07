@@ -95,19 +95,17 @@ class HierSeq:
             L=L
         )
     
+
+    # TBD: - logic is flawed here, and not just for HierSeq, but also for HierTraj
+    #      -> ver. here seems to be a intemediate logic semi-built for HierTraj not for HierSeq. 
+    #      -> for HierTraj ver. assumes static init_state which could be violated in practice -- it's better to use cumsum(tok == ACTION_TOK) instead
     @staticmethod
-    def _flatten_single_sample(token_sequences, timestamp_sequences, K: int, L: int):
+    def _flatten_single_sample(token_sequences: list, timestamp_sequences: Optional[list], K: int, L: int):
         """Flatten a single hierarchical sample by timestamp ordering."""
-    
+
         if timestamp_sequences is None:
             timestamp_sequences = []
-
-            tokens = token_sequences[0]
-            if isinstance(tokens, list): tokens = torch.tensor(tokens)
-            l0_timestamp = torch.cumsum(tokens==PLACE_HOLDER_ACTION_TOK, dim=0)
-            timestamp_sequences.append(l0_timestamp)
-
-            for level in range(1, L):
+            for level in range(L):
                 tokens = token_sequences[level]
                 if torch.is_tensor(tokens):
                     seq_len = tokens.size(0)
@@ -117,7 +115,7 @@ class HierSeq:
                 
                 gap = K ** level
                 timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
-        
+            
         # Collect all (timestamp, level, token) tuples
         items = []
         for level in range(L):
@@ -274,6 +272,7 @@ class HierTraj:
 
         if timestamp_sequences is None:
             timestamp_sequences = []
+
             for level in range(L):
                 tokens = token_sequences[level]
                 if torch.is_tensor(tokens):
@@ -281,10 +280,11 @@ class HierTraj:
                     tokens = tokens.tolist()
                 else:
                     seq_len = len(tokens)
-                
+
                 if level == 0: 
-                    timestamp_sequences.append([i//2 for i in range(seq_len + 1)][1:]) # [0, 1, 1, 2, 2, 3, 3, ...]
-                else:
+                    timestamp_l0 = torch.cumsum(tokens==PLACE_HOLDER_ACTION_TOK, dim=0)
+                    timestamp_sequences.append(timestamp_l0)
+                else: 
                     gap = K ** level
                     timestamp_sequences.append([(i + 1) * gap for i in range(seq_len)])
             

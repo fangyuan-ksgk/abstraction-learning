@@ -237,12 +237,7 @@ class GAT(nn.Module):
 
     def forward(self, batch_data: HierSeq):
 
-        input_idx = batch_data.tokens[:-1]
-        target_idx = batch_data.tokens[1:]
-        input_levels = batch_data.levels[:-1]
-        target_levels = batch_data.levels[1:]
-
-        sample_idx = batch_data.sample_idx
+        input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
 
         def sample_causal_mask(b, h, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
@@ -291,7 +286,7 @@ class GAT(nn.Module):
         x = norm(x)
 
         batch_data = self._hierachical_generate(x, batch_data)
-        
+
         return batch_data
 
     def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
