@@ -595,23 +595,23 @@ class DAT(nn.Module):
         states = self._generate_tokens_by_type(x, masks, toks_next, PLACE_HOLDER_STATE_TOK, self.state_decoder)
 
         i_a = i_s = 0
-        for b in batch_indices: 
-            if toks_next[b] == PLACE_HOLDER_ACTION_TOK: 
+        for i, b in enumerate(batch_indices): 
+            if toks_next[i] == PLACE_HOLDER_ACTION_TOK: 
                 new_action = actions[i_a:i_a + 1] if trajectories[b][1] is None else torch.cat([trajectories[b][1], actions[i_a:i_a+1]])
                 trajectories[b] = (trajectories[b][0], new_action, trajectories[b][2])
                 batch_data.insert_next_token(b, PLACE_HOLDER_ACTION_TOK, 0, timestamps[b])
                 i_a += 1
-            elif toks_next[b] == PLACE_HOLDER_STATE_TOK: 
+            elif toks_next[i] == PLACE_HOLDER_STATE_TOK: 
                 new_state = states[i_s:i_s + 1] if trajectories[b][0] is None else torch.cat([trajectories[b][0], states[i_s:i_s+1]])
                 trajectories[b] = (new_state, trajectories[b][1], trajectories[b][2])
                 batch_data.insert_next_token(b, PLACE_HOLDER_STATE_TOK, 0, timestamps[b])
                 i_s += 1
             else: 
-                raise ValueError(f"Invalid token: {toks_next[b]}")
+                raise ValueError(f"Invalid token: {toks_next[i]}")
 
     def _process_higher_level_tokens(self, x, group, batch_data, l_next):
 
-        batch_indices, masks, timestamps, toks_next = zip(*group)
+        batch_indices, masks, timestamps, _ = zip(*group)
         
         reprs = torch.stack([x[0, mask][-1] for mask in masks])
         tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
