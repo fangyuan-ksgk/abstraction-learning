@@ -252,15 +252,7 @@ class GAT(nn.Module):
         S = input_idx.shape[0]
         block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
-
-        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
-
-        for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l)
-            if level_mask.any():  
-                level_tokens = input_idx[level_mask]  
-                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[:,level_mask] = level_embed
+        x = self._create_hseq_embd(batch_data, do_slice=True)
 
         x = norm(x)
         x0 = x
@@ -270,6 +262,61 @@ class GAT(nn.Module):
             x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
 
         x = norm(x)
+
+        loss = self._compute_hseq_loss(x, batch_data)
+
+        return loss
+    
+    def generate(self, batch_data: HierSeq):
+
+        input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
+
+        def sample_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
+
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self._create_hseq_embd(batch_data, do_slice=False)
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        batch_data = self._hierachical_generate(x, batch_data)
+        
+        return batch_data
+
+    def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
+
+        if do_slice: 
+            input_idx, input_levels = batch_data.tokens[:-1], batch_data.levels[:-1]
+        else: 
+            input_idx, input_levels = batch_data.tokens, batch_data.levels
+
+        S = input_idx.shape[0]
+        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
+
+        for l in range(self.L): # per-level embedding
+            level_mask = (input_levels == l)
+            if level_mask.any():  
+                level_tokens = input_idx[level_mask]  
+                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
+                x[:,level_mask] = level_embed
+
+        return x
+
+    def _compute_hseq_loss(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
+
+        target_idx, target_levels = batch_data.tokens[1:], batch_data.levels[1:]
+        sample_idx = batch_data.sample_idx
 
         total_loss = 0.0 
         total_weight = 0.0
@@ -289,50 +336,33 @@ class GAT(nn.Module):
 
         return total_loss / total_weight
 
-    
-    def generate(self, batch_data: HierSeq):
 
-        input_idx, input_levels, input_timestamps = batch_data.tokens, batch_data.levels, batch_data.timestamps
-        sample_idx = batch_data.sample_idx
+    def _hierachical_generate(self, x: torch.Tensor, batch_data: HierSeq):
 
-        def sample_causal_mask(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
-            return causal_mask & sample_mask
-
-        S = input_idx.shape[0]
-        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
-        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
-
-        for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l)
-            if level_mask.any():  
-                level_tokens = input_idx[level_mask]  
-                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[:,level_mask] = level_embed
-
-        x = norm(x)
-        x0 = x
-        v1 = None
-
-        for i in range(self.num_layers):
-            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
-
-        x = norm(x)
-
-        for b in range(batch_data.batch_size):
-
-            mask = sample_idx == b
-            l_next, t_next = get_next_token_level(input_levels[mask], input_timestamps[mask], self.K, self.L)
-
-            logits = self.lm_heads[l_next](x[0, mask][-1])
-            logits = 30 * torch.tanh(logits / 30).float()
-            next_token = torch.argmax(logits, dim=-1)
-
-            batch_data.insert_next_token(b, next_token, l_next, t_next)
-
+        level_groups = self._group_by_next_level(batch_data)
+        
+        for l_next, group in level_groups.items(): 
+            batch_indices, masks, timestamps = zip(*group)
+            reprs = torch.stack([x[0, mask][-1] for mask in masks])
+            next_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next-1](reprs) / 30), dim=-1)
+            for i, b in enumerate(batch_indices): 
+                batch_data.insert_next_token(b, next_tokens[i], l_next, timestamps[i])
+        
         return batch_data
+
+    def _group_by_next_level(self, batch_data: HierSeq) -> dict:
+
+        level_groups = defaultdict(list) 
+        for b in range(batch_data.batch_size): 
+            mask = batch_data.sample_idx == b
+            l_next, t_next = get_next_token_level(
+                batch_data.levels[mask], batch_data.timestamps[mask], self.K, self.L
+            )
+            level_groups[l_next.item()].append((b, mask, t_next))
+
+        return level_groups
+
+
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -532,8 +562,6 @@ class DAT(nn.Module):
 
 
     def _compute_htraj_loss(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list) -> torch.Tensor:
-        # (TBD). When trajectory contains 'un-grounded' action tokens, I encounter error here
-        #        specifically, 
    
         action_tensor = torch.cat([t[1] for t in trajectories], dim=0)
         state_tensor = torch.cat([t[0] for t in trajectories], dim=0)
@@ -568,7 +596,7 @@ class DAT(nn.Module):
         
         return total_loss / total_weight
  
-    def _group_by_next_level(self, batch_data):
+    def _group_by_next_level(self, batch_data: HierTraj):
         level_groups = defaultdict(list) 
         for b in range(batch_data.batch_size): 
             mask = batch_data.sample_idx == b
@@ -578,7 +606,7 @@ class DAT(nn.Module):
             level_groups[l_next.item()].append((b, mask, t_next, tok_next))
         return level_groups
 
-    def _generate_tokens_by_type(self, x, masks, toks_next, token_type, decoder):
+    def _generate_tokens_by_type(self, x: torch.Tensor, masks: list, toks_next: list, token_type: int, decoder: nn.Module):
         filtered_masks = [mask for mask, tok in zip(masks, toks_next) if tok == token_type]
         if not filtered_masks:
             return None
@@ -586,7 +614,7 @@ class DAT(nn.Module):
         reprs = torch.stack([x[0, mask[:x_len]][-1] for mask in filtered_masks])
         return decoder.generate(reprs)
         
-    def _process_zero_level_tokens(self, x, group, batch_data, trajectories):
+    def _process_zero_level_tokens(self, x: torch.Tensor, group: list, batch_data: HierTraj, trajectories: list):
 
         batch_indices, masks, timestamps, toks_next = zip(*group)
         
@@ -608,7 +636,7 @@ class DAT(nn.Module):
             else: 
                 raise ValueError(f"Invalid token: {toks_next[i]}")
 
-    def _process_higher_level_tokens(self, x, group, batch_data, l_next):
+    def _process_higher_level_tokens(self, x: torch.Tensor, group: list, batch_data: HierTraj, l_next: int):
 
         batch_indices, masks, timestamps, _ = zip(*group)
         
@@ -619,7 +647,7 @@ class DAT(nn.Module):
             batch_data.insert_next_token(b, tokens[i], l_next, timestamps[i])
 
 
-    def _hiearchical_generate(self, x, batch_data, trajectories):
+    def _hiearchical_generate(self, x: torch.Tensor, batch_data: HierTraj, trajectories: list):
 
         level_groups = self._group_by_next_level(batch_data)
         

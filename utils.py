@@ -22,7 +22,7 @@ def get_next_token_level(levels, timestamps, K, L):
         return make_return(0, 1)
 
     mask = torch.logical_and(levels >= current_level, timestamps >= current_time - K**(current_level + 1) + 1)
-    is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1)
+    is_enough = timestamps[mask][0] == (current_time - K**(current_level + 1) + 1) # this is wrong (!) - we need to validate this, too 
     do_plan = all(levels[mask] == current_level) & is_enough
 
     if do_plan: 
