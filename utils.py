@@ -3,6 +3,9 @@ from typing import List, Optional, Union
 import torch, random, time
 from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 from IPython.display import clear_output
+from matplotlib import pyplot as plt 
+import matplotlib.animation as animation
+
 
 
 # Generation Helper functions: Decide the next token level & timestamp to generate 
@@ -202,6 +205,8 @@ class HierSeq:
             torch.tensor([sample_idx]),
             self.sample_idx[insert_pos:]
         ])        
+
+        
 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -726,3 +731,28 @@ def stream_print_htraj(batch_data: HierTraj, clear=True):
     print()
 
 
+def draw_gif(frames, txt="DAT agent playing snake", path="./visual/dat_snake.gif"):
+    fig, ax = plt.subplots()
+    ax.axis('off')
+    
+    # Stitch all frames from all rounds together
+    all_frames = []
+    frame_info = []  # Store (round_idx, frame_idx, total_frames_in_round) for each frame
+    
+    for round_idx, round_frames in frames.items():
+        for frame_idx, frame in enumerate(round_frames):
+            all_frames.append(frame)
+            frame_info.append((round_idx, frame_idx, len(round_frames)))
+    
+    # Create animation from stitched frames
+    def animate(global_frame_idx):
+        ax.clear()
+        ax.imshow(all_frames[global_frame_idx])
+        ax.axis('off')
+        
+        round_idx, frame_idx, total_frames = frame_info[global_frame_idx]
+        ax.set_title(f'{txt} - Round {round_idx + 1} Frame {frame_idx + 1}/{total_frames}')
+    
+    anim = animation.FuncAnimation(fig, animate, frames=len(all_frames), interval=200, repeat=True)
+    
+    anim.save(path, writer='pillow')

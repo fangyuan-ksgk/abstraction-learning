@@ -28,7 +28,7 @@ class SnakeGameEngine:
     - Reset functionality
     """
     
-    def __init__(self, width: int = 10, height: int = 10, cell_size: int = 40):
+    def __init__(self, width: int = 10, height: int = 10, cell_size: int = 40, show_window: bool = False):
         self.width = width
         self.height = height
         self.cell_size = cell_size
@@ -43,7 +43,8 @@ class SnakeGameEngine:
         
         # Pygame setup for visualization
         pygame.init()
-        self.screen = pygame.display.set_mode((width * cell_size, height * cell_size))
+        flags = 0 if show_window else pygame.HIDDEN
+        self.screen = pygame.display.set_mode((width * cell_size, height * cell_size), flags=flags)
         pygame.display.set_caption("Snake RL Environment")
         self.clock = pygame.time.Clock()
         
@@ -319,9 +320,8 @@ class SnakeGameEngine:
 
 
 
-# Snake-specific state & action encoder & decoder modules 
-# ------------------------------------------------------------------------------------------------
-
+# Action / State Encoder & Decoder for Snake Game (component of DAT)
+# --------------------------------------------------------------------------------------------------------------------------
 
 class StateEncoder(nn.Module):
     
