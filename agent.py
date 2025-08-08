@@ -36,13 +36,15 @@ class HiearchicalAgent:
         self.dat = dat
         self.state, self.trajectory = _init_trajectory(init_obs, K=self.dat.K, L=self.dat.L, device=device)
         self.device = device
+        self.action_size = self.dat.action_encoder.action_size
 
-    def act(self, epsilon: float): 
-        # TBD: missing random action selection logic & epsilon-greedy logic
+    def act(self, epsilon: float = 0.0): 
         pairs = self.dat.act(self.state, self.trajectory)
         assert len(pairs) == 1, "Only one sample is supported for now -- unless we figure out how to parallelize environment & load from state"
         _, action_idx = pairs[0]
-        return action_idx.item() 
+        if torch.rand(1) < epsilon:
+            action_idx = torch.randint(0, self.action_size, (1,))
+        return action_idx.item()
     
     def update(self, obs: Union[numpy.array, torch.Tensor], action: Union[int, torch.Tensor], reward: float): 
         
@@ -56,7 +58,6 @@ class HiearchicalAgent:
         _obs, _action, _reward = self.trajectory.pop() # pop at the end
 
         assert has_action, "Last time-stamp misses action, illegal update"
-        assert _action is not None and _action[-1] == action, "Provided action doesn't match last time-stamp action, update is illegal"
         assert _reward is None or _reward.size(0) < _action.size(0), "Reward already exists, update is illegal"
 
         if not has_state: 
@@ -67,14 +68,15 @@ class HiearchicalAgent:
             obs = torch.cat([_obs[:-1], obs.unsqueeze(0)])  # replace imaginary state with grounded one
 
         reward = torch.cat([_reward, reward]) if _reward is not None else reward
+        action = torch.cat([_action[:-1], action]) if _action is not None else action
 
-        self.trajectory.append((obs, _action, reward))
+        self.trajectory.append((obs, action, reward))
 
 
 
 # Utility functions for game play visualization
 # --------------------------------------------------------------------------------------------------------------------------
-def collect_dat_game_play_frames(dat: DAT, env, n_rounds: int = 5):
+def collect_dat_game_play_frames(dat: DAT, env, n_rounds: int = 5, epsilon: float = 0.0):
 
     frames = {}
     for i in range(n_rounds):
@@ -85,7 +87,7 @@ def collect_dat_game_play_frames(dat: DAT, env, n_rounds: int = 5):
         done = False
         frames[i] = []
         while not done:
-            action = dat_bot.act(0.0) # select action & imagine next state 
+            action = dat_bot.act(epsilon) # select action & imagine next state 
             obs, reward, done, info = env.step(action) # environment step
             dat_bot.update(obs, action, reward)
 

@@ -425,6 +425,7 @@ from model import CastedLinear
 class ActionEncoder(nn.Module): # arguably exactly the same as WTE
     def __init__(self, action_size, feature_dim):
         super(ActionEncoder, self).__init__()
+        self.action_size = action_size
         self.wte = nn.Embedding(action_size, feature_dim)
     
     def forward(self, x):
