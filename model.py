@@ -262,7 +262,7 @@ class GAT(nn.Module):
 
         return loss
     
-    def generate(self, batch_data: HierSeq):
+    def generate(self, batch_data: HierSeq, denoise: bool = False):
 
         input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
 
@@ -285,7 +285,10 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        batch_data = self._hierachical_generate(x, batch_data)
+        if denoise:
+            batch_data = self._parallel_denoise(x, batch_data)
+        else:
+            batch_data = self._causal_generate(x, batch_data)
 
         return batch_data
 
@@ -350,14 +353,9 @@ class GAT(nn.Module):
         level_groups = batch_data.next_level_groups() 
         return self._hierachical_generate(x, batch_data, level_groups)
 
-    def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq): 
-
-        # (TBD). Group padded abstract tokens by level, provide their 'batch_idx', 'mask', 'timestamp'
+    def _parallel_denoise(self, x: torch.Tensor, batch_data: HierSeq): 
         level_groups = batch_data.get_pad_groups()  # (level, (batch_idx, mask, timestamp))
-
         return self._hierachical_generate(x, batch_data, level_groups)
-
-
 
 
 # --------------------------------------------------------------------------------------------------------------------------

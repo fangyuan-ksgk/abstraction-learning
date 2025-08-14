@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Union
 import torch, random, time
-from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK, PLACE_HOLDER_TOK
+from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK, MASK_TOK
 from IPython.display import clear_output
 from matplotlib import pyplot as plt 
 import matplotlib.animation as animation
@@ -165,51 +165,6 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
-    # TBD: call 'insert_tokens' to replace the lengthy code for this one
-    def insert_next_token(self, sample_idx: int, next_token: Union[torch.Tensor, int], next_level: int, next_timestamp: int):
-        """
-        Insert next token for a specific sample at the end of that sample's sequence (in-place)
-        """
-        self.insert_tokens(sample_idx, next_token, next_level, next_timestamp)
-
-        # sample_positions = torch.where(self.sample_idx == sample_idx)[0]
-        # if len(sample_positions) == 0:
-        #     raise ValueError(f"Sample {sample_idx} not found in batch")
-        
-        # last_pos = sample_positions[-1].item()
-        
-        # insert_pos = last_pos + 1
-        
-        # if not torch.is_tensor(next_token):
-        #     next_token = torch.tensor([next_token])
-        # elif next_token.dim() == 0:
-        #     next_token = next_token.unsqueeze(0)
-        
-        # self.tokens = torch.cat([
-        #     self.tokens[:insert_pos], 
-        #     next_token,
-        #     self.tokens[insert_pos:]
-        # ])
-        
-        # self.levels = torch.cat([
-        #     self.levels[:insert_pos],
-        #     torch.tensor([next_level]),
-        #     self.levels[insert_pos:]
-        # ])
-        
-        # self.timestamps = torch.cat([
-        #     self.timestamps[:insert_pos],
-        #     torch.tensor([next_timestamp]),
-        #     self.timestamps[insert_pos:]
-        # ])
-        
-        # self.sample_idx = torch.cat([
-        #     self.sample_idx[:insert_pos],
-        #     torch.tensor([sample_idx]),
-        #     self.sample_idx[insert_pos:]
-        # ])      
-
-    # ideally this is the main function, 'insert_next_token' merely call this function under the hood
     def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int]): 
         """Insert multiple tokens for a specific sample at positions determined by timestamps."""
         if not torch.is_tensor(tokens):
@@ -288,6 +243,30 @@ class HierSeq:
 
         return level_groups
 
+    def get_pad_groups(self): 
+
+        pad_groups = defaultdict(list)
+
+        for b in range(self.batch_size): 
+
+            mask = self.sample_idx == b
+            sample_levels = self.levels[mask]
+            sample_timestamps = self.timestamps[mask]
+            sample_tokens = self.tokens[mask]
+
+            pad_mask = (sample_tokens == MASK_TOK) & (sample_levels > 0)
+            
+            if pad_mask.any():
+                pad_levels = sample_levels[pad_mask]
+                pad_timestamps = sample_timestamps[pad_mask]
+                
+                for level in pad_levels.unique():
+                    level_mask = pad_levels == level
+                    level_timestamps = pad_timestamps[level_mask]
+                    pad_groups[level.item()].append((b, mask, level_timestamps))
+
+        return pad_groups
+
         
 # Pad place-holder abstract tokens for HierSeq | Used for buffer initialization
 # --------------------------------------------------------------------------------------------------------------------------
@@ -308,7 +287,9 @@ def pad_abstract_tokens(batch_data: HierSeq):
         end_ts = sample_timestamps[-1]
         for l in range(1, batch_data.L):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
-            batch_data.insert_tokens(b, PLACE_HOLDER_TOK, l, abs_tok_ts)
+            batch_data.insert_tokens(b, MASK_TOK, l, abs_tok_ts)
+
+
 
 # --------------------------------------------------------------------------------------------------------------------------
 
