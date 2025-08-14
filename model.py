@@ -338,7 +338,8 @@ class GAT(nn.Module):
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 
     #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
 
-    def _hierachical_generate(self, x: torch.Tensor, batch_data: HierSeq, level_groups: dict):
+    def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+        level_groups = batch_data.next_level_groups() 
 
         for l_next, group in level_groups.items(): 
             batch_indices, masks, timestamps = zip(*group)
@@ -349,13 +350,16 @@ class GAT(nn.Module):
         
         return batch_data
 
-    def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq): 
-        level_groups = batch_data.next_level_groups() 
-        return self._hierachical_generate(x, batch_data, level_groups)
-
     def _parallel_denoise(self, x: torch.Tensor, batch_data: HierSeq): 
-        level_groups = batch_data.get_pad_groups()  # (level, (batch_idx, mask, timestamp))
-        return self._hierachical_generate(x, batch_data, level_groups)
+        level_groups = batch_data.get_pad_groups()  # (level, (batch_indices, mask_positions, timestamps))
+
+        for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
+            reprs = x[0, mask_positions]  
+            denoised_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_curr](reprs) / 30), dim=-1)
+            for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
+                batch_data.insert_tokens(b, denoised_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
+
+        return batch_data
 
 
 # --------------------------------------------------------------------------------------------------------------------------
