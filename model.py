@@ -334,31 +334,29 @@ class GAT(nn.Module):
     # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 
     #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
-    
-    def _hierachical_generate(self, x: torch.Tensor, batch_data: HierSeq):
 
-        level_groups = self._group_by_next_level(batch_data)
-        
+    def _hierachical_generate(self, x: torch.Tensor, batch_data: HierSeq, level_groups: dict):
+
         for l_next, group in level_groups.items(): 
             batch_indices, masks, timestamps = zip(*group)
             reprs = torch.stack([x[0, mask][-1] for mask in masks])
             next_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next](reprs) / 30), dim=-1)
             for i, b in enumerate(batch_indices): 
-                batch_data.insert_next_token(b, next_tokens[i], l_next, timestamps[i])
+                batch_data.insert_tokens(b, next_tokens[i], l_next, timestamps[i])
         
         return batch_data
 
-    def _group_by_next_level(self, batch_data: HierSeq) -> dict:
+    def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+        level_groups = batch_data.next_level_groups() 
+        return self._hierachical_generate(x, batch_data, level_groups)
 
-        level_groups = defaultdict(list) 
-        for b in range(batch_data.batch_size): 
-            mask = batch_data.sample_idx == b
-            l_next, t_next = get_next_token_level(
-                batch_data.levels[mask], batch_data.timestamps[mask], self.K, self.L
-            )
-            level_groups[l_next.item()].append((b, mask, t_next))
+    def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq): 
 
-        return level_groups
+        # (TBD). Group padded abstract tokens by level, provide their 'batch_idx', 'mask', 'timestamp'
+        level_groups = batch_data.get_pad_groups()  # (level, (batch_idx, mask, timestamp))
+
+        return self._hierachical_generate(x, batch_data, level_groups)
+
 
 
 

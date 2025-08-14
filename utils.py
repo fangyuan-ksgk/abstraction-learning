@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from typing import List, Optional, Union
 import torch, random, time
-from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
+from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK, PLACE_HOLDER_TOK
 from IPython.display import clear_output
 from matplotlib import pyplot as plt 
 import matplotlib.animation as animation
-
+from collections import defaultdict
 
 
 # Generation Helper functions: Decide the next token level & timestamp to generate 
@@ -165,48 +165,150 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
+    # TBD: call 'insert_tokens' to replace the lengthy code for this one
     def insert_next_token(self, sample_idx: int, next_token: Union[torch.Tensor, int], next_level: int, next_timestamp: int):
         """
         Insert next token for a specific sample at the end of that sample's sequence (in-place)
         """
-        sample_positions = torch.where(self.sample_idx == sample_idx)[0]
-        if len(sample_positions) == 0:
+        self.insert_tokens(sample_idx, next_token, next_level, next_timestamp)
+
+        # sample_positions = torch.where(self.sample_idx == sample_idx)[0]
+        # if len(sample_positions) == 0:
+        #     raise ValueError(f"Sample {sample_idx} not found in batch")
+        
+        # last_pos = sample_positions[-1].item()
+        
+        # insert_pos = last_pos + 1
+        
+        # if not torch.is_tensor(next_token):
+        #     next_token = torch.tensor([next_token])
+        # elif next_token.dim() == 0:
+        #     next_token = next_token.unsqueeze(0)
+        
+        # self.tokens = torch.cat([
+        #     self.tokens[:insert_pos], 
+        #     next_token,
+        #     self.tokens[insert_pos:]
+        # ])
+        
+        # self.levels = torch.cat([
+        #     self.levels[:insert_pos],
+        #     torch.tensor([next_level]),
+        #     self.levels[insert_pos:]
+        # ])
+        
+        # self.timestamps = torch.cat([
+        #     self.timestamps[:insert_pos],
+        #     torch.tensor([next_timestamp]),
+        #     self.timestamps[insert_pos:]
+        # ])
+        
+        # self.sample_idx = torch.cat([
+        #     self.sample_idx[:insert_pos],
+        #     torch.tensor([sample_idx]),
+        #     self.sample_idx[insert_pos:]
+        # ])      
+
+    # ideally this is the main function, 'insert_next_token' merely call this function under the hood
+    def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int]): 
+        """Insert multiple tokens for a specific sample at positions determined by timestamps."""
+        if not torch.is_tensor(tokens):
+            tokens = torch.tensor([tokens])
+        elif tokens.dim() == 0:
+            tokens = tokens.unsqueeze(0)
+            
+        if not torch.is_tensor(timestamps):
+            timestamps = torch.tensor([timestamps])
+        elif timestamps.dim() == 0:
+            timestamps = timestamps.unsqueeze(0)
+        
+        if tokens.size(0) == 1 and timestamps.size(0) > 1:
+            tokens = tokens.expand(timestamps.size(0))
+        
+        assert tokens.size(0) == timestamps.size(0), "Tokens and timestamps must have same length"
+        
+        sample_mask = self.sample_idx == sample_idx
+        if not sample_mask.any():
             raise ValueError(f"Sample {sample_idx} not found in batch")
         
-        last_pos = sample_positions[-1].item()
+        sample_positions = torch.where(sample_mask)[0]
+        sample_timestamps = self.timestamps[sample_mask]
+        sample_levels = self.levels[sample_mask]
         
-        insert_pos = last_pos + 1
-        
-        if not torch.is_tensor(next_token):
-            next_token = torch.tensor([next_token])
-        elif next_token.dim() == 0:
-            next_token = next_token.unsqueeze(0)
-        
-        self.tokens = torch.cat([
-            self.tokens[:insert_pos], 
-            next_token,
-            self.tokens[insert_pos:]
-        ])
-        
-        self.levels = torch.cat([
-            self.levels[:insert_pos],
-            torch.tensor([next_level]),
-            self.levels[insert_pos:]
-        ])
-        
-        self.timestamps = torch.cat([
-            self.timestamps[:insert_pos],
-            torch.tensor([next_timestamp]),
-            self.timestamps[insert_pos:]
-        ])
-        
-        self.sample_idx = torch.cat([
-            self.sample_idx[:insert_pos],
-            torch.tensor([sample_idx]),
-            self.sample_idx[insert_pos:]
-        ])        
+        for token, timestamp in zip(tokens, timestamps):
+            insert_after_mask = torch.logical_or(
+                sample_timestamps < timestamp,
+                torch.logical_and(sample_timestamps == timestamp, sample_levels < level)
+            )
+            
+            if insert_after_mask.any():
+                last_valid_pos = sample_positions[insert_after_mask][-1].item()
+                insert_pos = last_valid_pos + 1
+            else:
+                insert_pos = sample_positions[0].item()
+            
+            self.tokens = torch.cat([
+                self.tokens[:insert_pos],
+                token.unsqueeze(0) if token.dim() == 0 else token.unsqueeze(0),
+                self.tokens[insert_pos:]
+            ])
+            
+            self.levels = torch.cat([
+                self.levels[:insert_pos],
+                torch.tensor([level]),
+                self.levels[insert_pos:]
+            ])
+            
+            self.timestamps = torch.cat([
+                self.timestamps[:insert_pos],
+                timestamp.unsqueeze(0) if timestamp.dim() == 0 else timestamp.unsqueeze(0),
+                self.timestamps[insert_pos:]
+            ])
+            
+            self.sample_idx = torch.cat([
+                self.sample_idx[:insert_pos],
+                torch.tensor([sample_idx]),
+                self.sample_idx[insert_pos:]
+            ])
+            
+            sample_mask = self.sample_idx == sample_idx
+            sample_positions = torch.where(sample_mask)[0]
+            sample_timestamps = self.timestamps[sample_mask]
+            sample_levels = self.levels[sample_mask]
+
+    def next_level_groups(self): 
+
+        level_groups = defaultdict(list) 
+        for b in range(self.batch_size): 
+            mask = self.sample_idx == b
+            l_next, t_next = get_next_token_level(
+                self.levels[mask], self.timestamps[mask], self.K, self.L
+            )
+            level_groups[l_next.item()].append((b, mask, t_next))
+
+        return level_groups
 
         
+# Pad place-holder abstract tokens for HierSeq | Used for buffer initialization
+# --------------------------------------------------------------------------------------------------------------------------
+def pad_abstract_tokens(batch_data: HierSeq): 
+
+    levels = batch_data.levels
+    timestamps = batch_data.timestamps
+    sample_idx = batch_data.sample_idx
+
+    assert not (levels > 0).any(), "Abstract tokens exists in the data ... Can't pad abstract tokens in"
+
+    for b in range(batch_data.batch_size): 
+        mask = sample_idx == b
+        sample_levels = levels[mask]
+        sample_timestamps = timestamps[mask]
+
+        start_ts = sample_timestamps[0]
+        end_ts = sample_timestamps[-1]
+        for l in range(1, batch_data.L):
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
+            batch_data.insert_tokens(b, PLACE_HOLDER_TOK, l, abs_tok_ts)
 
 # --------------------------------------------------------------------------------------------------------------------------
 
