@@ -165,6 +165,7 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
+    # (TBD). Insert doesn't replace tokens, need to fix
     def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int]): 
         """Insert multiple tokens for a specific sample at positions determined by timestamps."""
         
@@ -206,7 +207,6 @@ class HierSeq:
             else:
                 insert_pos = sample_positions[0].item()
 
-            # TBD: replace tokens if already exist at that level and timestamp
             suffix_mask = torch.logical_or(
                 sample_timestamps > timestamp,
                 torch.logical_and(sample_timestamps == timestamp, sample_levels > level)
@@ -214,7 +214,7 @@ class HierSeq:
             if suffix_mask.any():
                 suffix_pos = sample_positions[suffix_mask][0].item()
             else:
-                suffix_pos = insert_pos
+                suffix_pos = sample_positions[-1].item() + 1 # essentially no suffix within the sample
             
             self.tokens = torch.cat([
                 self.tokens[:insert_pos],
@@ -257,60 +257,32 @@ class HierSeq:
 
         return level_groups
 
-    def _get_pad_groups(self): 
+    def get_abstract_groups(self): 
+        # Collect indices of representation used to predict abstract tokens, timestamp & level of these abstract tokens (for parallel AR generation)
 
-        pad_groups = defaultdict(list)
+        abs_groups = defaultdict(list)
 
         for b in range(self.batch_size): 
-
             mask = self.sample_idx == b
             sample_levels = self.levels[mask]
             sample_timestamps = self.timestamps[mask]
-            sample_tokens = self.tokens[mask]
 
-            pad_mask = (sample_tokens == MASK_TOK) & (sample_levels > 0)
-            
-            if pad_mask.any():
-                pad_levels = sample_levels[pad_mask]
-                pad_timestamps = sample_timestamps[pad_mask]
-                
-                for level in pad_levels.unique():
-                    level_timestamps = pad_timestamps[pad_levels == level]
-                    level_pad_mask = mask & (self.tokens == MASK_TOK) & (self.levels == level)
-                    pad_groups[level.item()].append((b, level_pad_mask, level_timestamps))
+            abs_mask = sample_levels > 0 
+            if abs_mask.any():
+                abs_levels = sample_levels[abs_mask]
+                abs_timestamps = sample_timestamps[abs_mask]
 
-        return pad_groups
+                for level in abs_levels.unique(): 
+                    level_timestamps = abs_timestamps[abs_levels == level]
+                    prefix_mask = torch.cat([self.levels[1:] == level, torch.tensor([False], device=self.levels.device)])
+                    repr_indices = torch.where(mask & prefix_mask)[0] 
+                    abs_groups[level.item()].append((torch.tensor([b]*level_timestamps.size(0)), repr_indices, level_timestamps))
 
-    def get_pad_groups(self): 
-        raw_groups = self._get_pad_groups()
-        combined_groups = {}
-        
-        for level, group in raw_groups.items():
-            if not group:
-                continue
-                
-            batch_indices_list, masks_list, timestamps_list = zip(*group)
-            
-            combined_mask = torch.zeros(len(self.tokens), dtype=torch.bool)
-            for mask in masks_list:
-                combined_mask |= mask
-            
-            mask_positions = torch.where(combined_mask)[0]
-            
-            if len(mask_positions) == 0:
-                continue
-            
-            expanded_batch_indices = []
-            expanded_timestamps = []
-            
-            for b, mask, timestamps in group:
-                num_masked = mask.sum().item()
-                expanded_batch_indices.extend([b] * num_masked)
-                expanded_timestamps.extend(timestamps.tolist())
-            
-            combined_groups[level] = (expanded_batch_indices, mask_positions, torch.tensor(expanded_timestamps))
-        
-        return combined_groups
+        combined_groups = {} 
+        for level, group in abs_groups.items(): 
+            combined_groups[level] = (torch.cat([b for b, _, _ in group]), torch.cat([ind for _, ind, _ in group]), torch.cat([t for _, _, t in group]))
+
+        return combined_groups 
 
 
 # Pad place-holder abstract tokens for HierSeq | Used for buffer initialization

@@ -262,7 +262,7 @@ class GAT(nn.Module):
 
         return loss
     
-    def generate(self, batch_data: HierSeq, denoise: bool = False):
+    def generate(self, batch_data: HierSeq, parallel: bool = False):
 
         input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
 
@@ -285,10 +285,10 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        if denoise:
-            batch_data = self._parallel_denoise(x, batch_data)
+        if parallel:
+            batch_data = self._parallel_generate(x, batch_data) # fast, parallel AR generation (partial conditioning with Padding)
         else:
-            batch_data = self._causal_generate(x, batch_data)
+            batch_data = self._causal_generate(x, batch_data) # slow, sequential AR generation (full conditioning)
 
         return batch_data
 
@@ -350,14 +350,14 @@ class GAT(nn.Module):
         
         return batch_data
 
-    def _parallel_denoise(self, x: torch.Tensor, batch_data: HierSeq): 
-        level_groups = batch_data.get_pad_groups()  # (level, (batch_indices, mask_positions, timestamps))
+    def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+        level_groups = batch_data.get_abstract_groups()  # (level, (batch_indices, mask_positions, timestamps))
 
         for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
-            reprs = x[0, mask_positions]  
-            denoised_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_curr](reprs) / 30), dim=-1)
+            reprs = x[0, mask_positions] 
+            new_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_curr](reprs) / 30), dim=-1)
             for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
-                batch_data.insert_tokens(b, denoised_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
+                batch_data.insert_tokens(b, new_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
 
         return batch_data
 
