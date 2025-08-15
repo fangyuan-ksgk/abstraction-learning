@@ -284,8 +284,12 @@ class HierSeq:
 
         return combined_groups 
 
+    def slice_prefix(self): 
+        # Slice the HierSeq so that only prefix is retained
+        raise NotImplementedError("Not implemented yet")
 
-# Pad place-holder abstract tokens for HierSeq | Used for buffer initialization
+
+# Search Utility Functions
 # --------------------------------------------------------------------------------------------------------------------------
 def pad_abstract_tokens(batch_data: HierSeq): 
 
@@ -306,6 +310,85 @@ def pad_abstract_tokens(batch_data: HierSeq):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
             batch_data.insert_tokens(b, MASK_TOK, l, abs_tok_ts)
 
+def remove_pad_tokens(batch_data: HierSeq): 
+    """In-place removal of PAD tokens"""
+    pad_mask = torch.logical_and(batch_data.levels>0, batch_data.tokens==MASK_TOK)
+    batch_data.tokens = batch_data.tokens[~pad_mask]
+    batch_data.levels = batch_data.levels[~pad_mask]
+    batch_data.timestamps = batch_data.timestamps[~pad_mask]
+    batch_data.sample_idx = batch_data.sample_idx[~pad_mask]
+
+
+def slice_prefix_before_pad(hierseq, pad_token=MASK_TOK):
+
+    prefix_indices = []
+    
+    for b in range(hierseq.batch_size):
+        sample_mask = hierseq.sample_idx == b
+        sample_levels = hierseq.levels[sample_mask]
+        sample_positions = torch.where(sample_mask)[0]
+        
+        sample_tokens = hierseq.tokens[sample_mask]
+        pad_positions = torch.where(torch.logical_and(sample_tokens == pad_token, sample_levels > 0))[0]
+        
+        if len(pad_positions) > 0:
+            first_pad_local = pad_positions[0].item()
+            prefix_indices.extend(sample_positions[:first_pad_local].tolist())
+        else:
+            prefix_indices.extend(sample_positions.tolist())
+    
+    assert len(prefix_indices)>0, "Prefix HierSeq is empty, indicating it begin with abstract tokens that are padded."
+    
+    prefix_indices = torch.tensor(prefix_indices)
+    
+    return HierSeq(
+        tokens=hierseq.tokens[prefix_indices],
+        levels=hierseq.levels[prefix_indices],
+        timestamps=hierseq.timestamps[prefix_indices],
+        sample_idx=hierseq.sample_idx[prefix_indices],
+        batch_size=hierseq.batch_size,
+        K=hierseq.K,
+        L=hierseq.L
+    )
+
+
+def merge_prefix(prefix_batch, original_batch, mask_token=MASK_TOK):
+    """Assume one extra abstract token generated in prefix HierSeq, use it to replace [MASK] token in original HierSeq"""
+    
+    n_replaced = 0
+    for b in range(original_batch.batch_size):
+
+        orig_mask = original_batch.sample_idx == b
+        prefix_mask = prefix_batch.sample_idx == b
+        
+        orig_positions = torch.where(orig_mask)[0]
+        orig_tokens = original_batch.tokens[orig_mask]
+        orig_levels = original_batch.levels[orig_mask]
+
+        mask_locs = torch.where(torch.logical_and(orig_tokens==mask_token, orig_levels>0))[0]
+        
+        if len(mask_locs) == 0:
+            continue  # No MASK to replace
+        
+        prefix_positions = torch.where(prefix_mask)[0]
+        if len(prefix_positions) == 0:
+            continue
+            
+        new_token_idx = prefix_positions[-1]
+        new_token = prefix_batch.tokens[new_token_idx]
+        
+        first_mask_global_idx = orig_positions[mask_locs[0]]
+        # print(f"Replacing {original_batch.tokens[first_mask_global_idx]} with {new_token} at {first_mask_global_idx}")
+
+        assert original_batch.levels[first_mask_global_idx] == prefix_batch.levels[new_token_idx], \
+            f"Level mismatch: expected {prefix_batch.levels[new_token_idx]}, got {original_batch.levels[first_mask_global_idx]}"
+        assert original_batch.timestamps[first_mask_global_idx] == prefix_batch.timestamps[new_token_idx], \
+            f"Timestamp mismatch: expected {prefix_batch.timestamps[new_token_idx]}, got {original_batch.timestamps[first_mask_global_idx]}"
+        
+        original_batch.tokens[first_mask_global_idx] = new_token
+        n_replaced += 1
+
+    return n_replaced
 
 
 # --------------------------------------------------------------------------------------------------------------------------
