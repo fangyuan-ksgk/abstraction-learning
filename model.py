@@ -3,6 +3,7 @@ import torch
 import itertools
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Union
 
 from pathlib import Path
 from typing import Optional
@@ -14,7 +15,7 @@ from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 from utils import (
     get_next_token_level, HierSeq, HierTraj, create_loss_mask,
     make_interleave_embd, create_traj_loss_mask, get_next_traj_token,
-    _build_interleave_embd
+    _build_interleave_embd, infer_critical_ts, compute_cond_ratio
 )
 
 
@@ -235,7 +236,7 @@ class GAT(nn.Module):
         self._compile = config._compile
         self.level_weights = config.level_weights
 
-    def forward(self, batch_data: HierSeq):
+    def forward(self, batch_data: HierSeq, evaluate: bool = False, p_thres: float = None):
 
         input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
 
@@ -258,9 +259,10 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        loss = self._compute_hseq_loss(x, batch_data)
-
-        return loss
+        if evaluate: 
+            return self._evaluate_hseq_perplexity(x, batch_data, p_thres)
+        else: 
+            return self._compute_hseq_loss(x, batch_data)
     
     def generate(self, batch_data: HierSeq, parallel: bool = False):
 
@@ -312,27 +314,59 @@ class GAT(nn.Module):
         return x
 
     def _compute_hseq_loss(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
+        ppt = self._compute_ppt(x, batch_data)
+        weighted_loss, raw_loss = self._compute_weighted_loss(batch_data, ppt)
+        return weighted_loss.mean()
+
+    def _evaluate_hseq_perplexity(self, x: torch.Tensor, batch_data: HierSeq, p_thres: float = None) -> tuple:
+        ppt = self._compute_ppt(x, batch_data)
+        weighted_loss, raw_loss = self._compute_weighted_loss(batch_data, ppt)
+        critical_timestamps = infer_critical_ts(ppt, batch_data, p_thres)
+        cr_per_sample = compute_cond_ratio(batch_data)
+        return weighted_loss, raw_loss, critical_timestamps, cr_per_sample
+
+
+    def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
 
         target_idx, target_levels = batch_data.tokens[1:], batch_data.levels[1:]
-        sample_idx = batch_data.sample_idx
+        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
 
-        total_loss = 0.0 
-        total_weight = 0.0
-        loss_mask = create_loss_mask(sample_idx)[1:]
+        ppt = torch.zeros_like(target_idx, device=self.device, dtype=torch.float32) # perplexity per token
 
-        for l in range(self.L): # per-level projection
-            target_level_mask = (target_levels == l) & loss_mask
-            if target_level_mask.any():  
-                level_logits = self.lm_heads[l](x[:, target_level_mask])
-                level_logits = 30 * torch.tanh(level_logits / 30).float()                
-                level_loss = F.cross_entropy(
-                    level_logits.view(-1, level_logits.size(-1)),
-                    target_idx[target_level_mask]
-                )
-                total_loss += self.level_weights[l] * level_loss
-                total_weight += self.level_weights[l]
+        for l in range(self.L):
+            level_mask = (target_levels == l) & loss_mask
+            if not level_mask.any():
+                continue
+            
+            level_logits = self.lm_heads[l](x[:, level_mask])
+            level_logits = 30 * torch.tanh(level_logits / 30).float()
+            level_losses = F.cross_entropy(
+                level_logits.view(-1, level_logits.size(-1)),
+                target_idx[level_mask],
+                reduction="none"
+            )
 
-        return total_loss / total_weight
+            ppt[level_mask] = level_losses
+
+        return ppt
+
+    def _compute_weighted_loss(self, batch_data: HierSeq, ppt: torch.Tensor) -> tuple:
+     
+        total_loss = torch.zeros(batch_data.batch_size, device=self.device)
+        total_weight = torch.zeros(batch_data.batch_size, device=self.device)
+        raw_loss = defaultdict(lambda: defaultdict(float))
+
+        for b in range(batch_data.batch_size): 
+            sample_mask = batch_data.sample_idx[1:] == b
+            for l in range(self.L): 
+                level_mask = (batch_data.levels[1:] == l) & sample_mask & (ppt > 0)
+                raw_loss[b][l] = ppt[level_mask].mean().item() if level_mask.any() else 0.0
+                if level_mask.any():
+                    total_loss[b] += self.level_weights[l] * ppt[level_mask].mean()
+                    total_weight[b] += self.level_weights[l]
+
+        return torch.where(total_weight > 0, total_loss / total_weight, torch.zeros_like(total_loss)), raw_loss
+
 
     # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 

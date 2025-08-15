@@ -291,13 +291,37 @@ class HierSeq:
 
 # Search Utility Functions
 # --------------------------------------------------------------------------------------------------------------------------
-def pad_abstract_tokens(batch_data: HierSeq): 
+def infer_critical_ts(perplexity_per_token: torch.Tensor, batch_data: HierSeq, p_thres: float = 1.0): 
+    critical_timestamps = torch.zeros(batch_data.batch_size, device=batch_data.tokens.device) - 1 # init to -1 (indicates no critical timestamp)
+    for b in range(batch_data.batch_size): 
+        sample_perp_mask = (batch_data.sample_idx[1:] == b) & (perplexity_per_token > p_thres) & (batch_data.levels[1:] == 0)
+        if sample_perp_mask.any():
+            high_perp_ts = batch_data.timestamps[1:][sample_perp_mask][0]
+            critical_timestamps[b] = high_perp_ts - 1
+    return critical_timestamps
+
+def compute_cond_ratio(batch_data: HierSeq): 
+
+    cond_ratios = []
+    for b in range(batch_data.batch_size): 
+        sample_mask = batch_data.sample_idx == b 
+        abs_mask = (batch_data.levels > 0) & (batch_data.tokens != MASK_TOK)
+        abs_count = (sample_mask & abs_mask).sum()
+
+        et, st = batch_data.timestamps[sample_mask][[-1, 0]]
+        required_abs_count = sum((et-st+1)//(batch_data.K**l) for l in range(1, batch_data.L))
+
+        cond_ratio = abs_count / required_abs_count
+        cond_ratios.append(cond_ratio)
+
+    return torch.tensor(cond_ratios)
+
+def pad_abstract_tokens(batch_data: HierSeq, critical_timestamps: Optional[torch.Tensor] = None): 
+    # (TBD). Verify this works with 'critical_timestamps' obtained from perplexity calculation.
 
     levels = batch_data.levels
     timestamps = batch_data.timestamps
     sample_idx = batch_data.sample_idx
-
-    assert not (levels > 0).any(), "Abstract tokens exists in the data ... Can't pad abstract tokens in"
 
     for b in range(batch_data.batch_size): 
         mask = sample_idx == b
@@ -305,6 +329,9 @@ def pad_abstract_tokens(batch_data: HierSeq):
         sample_timestamps = timestamps[mask]
 
         start_ts = sample_timestamps[0]
+        if critical_timestamps is not None: 
+            start_ts = max(sample_timestamps[0], critical_timestamps[b])
+
         end_ts = sample_timestamps[-1]
         for l in range(1, batch_data.L):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
