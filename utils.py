@@ -346,9 +346,15 @@ def compute_cond_ratio(batch_data: HierSeq):
 
     return torch.tensor(cond_ratios)
 
-def pad_abstract_tokens(batch_data: HierSeq, critical_timestamps: Optional[torch.Tensor] = None): 
-    # (TBD). Verify this works with 'critical_timestamps' obtained from perplexity calculation.
-
+def pad_abstract_tokens(batch_data: HierSeq, 
+                        critical_timestamps: Optional[torch.Tensor] = None,
+                        n_pad: Optional[int] = None): 
+    """
+    Pad / Replace abstract tokens with [MASK] tokens
+    Default: pad full abstract tokens from beginning timestamp
+    - critical_timestamps: beginning timestamp of [MASK] tokens to pad / replace
+    - n_pad: number of [MASK] tokens to pad from the beginning timestamp
+    """
     levels = batch_data.levels
     timestamps = batch_data.timestamps
     sample_idx = batch_data.sample_idx
@@ -364,7 +370,7 @@ def pad_abstract_tokens(batch_data: HierSeq, critical_timestamps: Optional[torch
 
         end_ts = sample_timestamps[-1]
         for l in range(1, batch_data.L):
-            abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:n_pad+1]
             batch_data.insert_tokens(b, MASK_TOK, l, abs_tok_ts)
 
 def remove_pad_tokens(batch_data: HierSeq): 
