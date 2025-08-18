@@ -264,7 +264,7 @@ class GAT(nn.Module):
         else: 
             return self._compute_hseq_loss(x, batch_data)
     
-    def generate(self, batch_data: HierSeq, parallel: bool = False):
+    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 1.0):
 
         input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
 
@@ -288,9 +288,9 @@ class GAT(nn.Module):
         x = norm(x)
 
         if parallel:
-            batch_data = self._parallel_generate(x, batch_data) # fast, parallel AR generation (partial conditioning with Padding)
+            batch_data = self._parallel_generate(x, batch_data, temperature) # fast, parallel AR generation (partial conditioning with Padding)
         else:
-            batch_data = self._causal_generate(x, batch_data) # slow, sequential AR generation (full conditioning)
+            batch_data = self._causal_generate(x, batch_data, temperature) # slow, sequential AR generation (full conditioning)
 
         return batch_data
 
@@ -395,7 +395,7 @@ class GAT(nn.Module):
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 
     #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
 
-    def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+    def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 1.0): 
         # (TBD). I don't believe this level_groups uses '[MASK]' token to decide what to generate
         #       - if it does, it shouldn't be used for general 'generate' function. 
 
@@ -404,25 +404,34 @@ class GAT(nn.Module):
         for l_next, group in level_groups.items(): 
             batch_indices, masks, timestamps = zip(*group)
             reprs = torch.stack([x[0, mask][-1] for mask in masks])
-            next_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_next](reprs) / 30), dim=-1)
+            next_tokens = self._decode(self.lm_heads[l_next](reprs), temperature)
             for i, b in enumerate(batch_indices): 
                 batch_data.insert_tokens(b, next_tokens[i], l_next, timestamps[i])
         
         return batch_data
 
-    def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+    def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 1.0): 
 
-        # (TBD). Resample on [MASK] token positions, not abstract token positions
+        # (TBD). Resample on [MASK] token positions
 
         level_groups = batch_data.get_pad_groups()  # (level, (batch_indices, mask_positions, timestamps))
 
         for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
             reprs = x[0, mask_positions] 
-            new_tokens = torch.argmax(30 * torch.tanh(self.lm_heads[l_curr](reprs) / 30), dim=-1)
+            new_tokens = self._decode(self.lm_heads[l_curr](reprs), temperature)
             for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
                 batch_data.insert_tokens(b, new_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
 
         return batch_data
+
+    def _decode(self, logits: torch.Tensor, temperature: float = 0.0):
+        if temperature == 0.0:
+            return torch.argmax(30 * torch.tanh(logits / 30), dim=-1)
+        else: 
+            logits = 30 * torch.tanh(logits / 30)
+            logits = logits.float()
+            return torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
+
 
 
 # --------------------------------------------------------------------------------------------------------------------------

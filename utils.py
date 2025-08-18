@@ -165,7 +165,6 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
-    # (TBD). Insert doesn't replace tokens, need to fix
     def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int]): 
         """Insert multiple tokens for a specific sample at positions determined by timestamps."""
         
@@ -348,12 +347,12 @@ def compute_cond_ratio(batch_data: HierSeq):
 
 def pad_abstract_tokens(batch_data: HierSeq, 
                         critical_timestamps: Optional[torch.Tensor] = None,
-                        n_pad: Optional[int] = None): 
+                        t_pad: Optional[int] = None): 
     """
     Pad / Replace abstract tokens with [MASK] tokens
     Default: pad full abstract tokens from beginning timestamp
     - critical_timestamps: beginning timestamp of [MASK] tokens to pad / replace
-    - n_pad: number of [MASK] tokens to pad from the beginning timestamp
+    - t_pad: number of timestamps to pad abstract tokens
     """
     levels = batch_data.levels
     timestamps = batch_data.timestamps
@@ -369,8 +368,11 @@ def pad_abstract_tokens(batch_data: HierSeq,
             start_ts = max(sample_timestamps[0], critical_timestamps[b])
 
         end_ts = sample_timestamps[-1]
+        if t_pad is not None: 
+            end_ts = min(end_ts, start_ts + t_pad)
+
         for l in range(1, batch_data.L):
-            abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:n_pad+1]
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts + 1, batch_data.K ** l)[1:]
             batch_data.insert_tokens(b, MASK_TOK, l, abs_tok_ts)
 
 def remove_pad_tokens(batch_data: HierSeq): 
