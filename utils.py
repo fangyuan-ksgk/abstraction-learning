@@ -284,6 +284,36 @@ class HierSeq:
 
         return combined_groups 
 
+
+    def get_pad_groups(self): 
+        
+        pad_groups = defaultdict(list)
+
+        for b in range(self.batch_size): 
+            mask = self.sample_idx == b
+            sample_levels = self.levels[mask]
+            sample_timestamps = self.timestamps[mask]
+            sample_tokens = self.tokens[mask]
+
+            pad_mask = torch.logical_and(sample_levels > 0, sample_tokens == MASK_TOK)
+            if pad_mask.any():
+                pad_levels = sample_levels[pad_mask]
+                pad_timestamps = sample_timestamps[pad_mask]
+
+                for level in pad_levels.unique(): 
+                    level_timestamps = pad_timestamps[pad_levels == level]
+                    prefix_mask = torch.cat([torch.logical_and(self.levels[1:]==level, self.tokens[1:]==MASK_TOK), torch.tensor([False], device=self.levels.device)])
+                    repr_indices = torch.where(mask & prefix_mask)[0]
+                    pad_groups[level.item()].append((torch.tensor([b]*level_timestamps.size(0)), repr_indices, level_timestamps))
+
+        combined_groups = {} 
+        for level, group in pad_groups.items(): 
+            combined_groups[level] = (torch.cat([b for b, _, _ in group]), torch.cat([ind for _, ind, _ in group]), torch.cat([t for _, _, t in group]))
+
+        return combined_groups 
+
+    
+
     def slice_prefix(self): 
         # Slice the HierSeq so that only prefix is retained
         raise NotImplementedError("Not implemented yet")

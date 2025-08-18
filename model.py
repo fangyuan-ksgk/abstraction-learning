@@ -294,6 +294,29 @@ class GAT(nn.Module):
 
         return batch_data
 
+    def propagate(self, batch_data: HierSeq): # Purely for debugging
+        input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
+
+        def sample_causal_mask(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            return causal_mask & sample_mask
+
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self._create_hseq_embd(batch_data, do_slice=True)
+
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+        return x
+
     def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
 
         if do_slice: 
@@ -373,6 +396,9 @@ class GAT(nn.Module):
     #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
 
     def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq): 
+        # (TBD). I don't believe this level_groups uses '[MASK]' token to decide what to generate
+        #       - if it does, it shouldn't be used for general 'generate' function. 
+
         level_groups = batch_data.next_level_groups() 
 
         for l_next, group in level_groups.items(): 
@@ -385,7 +411,10 @@ class GAT(nn.Module):
         return batch_data
 
     def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq): 
-        level_groups = batch_data.get_abstract_groups()  # (level, (batch_indices, mask_positions, timestamps))
+
+        # (TBD). Resample on [MASK] token positions, not abstract token positions
+
+        level_groups = batch_data.get_pad_groups()  # (level, (batch_indices, mask_positions, timestamps))
 
         for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
             reprs = x[0, mask_positions] 
