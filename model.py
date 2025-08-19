@@ -264,7 +264,7 @@ class GAT(nn.Module):
         else: 
             return self._compute_hseq_loss(x, batch_data)
     
-    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 1.0):
+    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0):
 
         input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
 
@@ -388,6 +388,8 @@ class GAT(nn.Module):
                     total_loss[b] += self.level_weights[l] * ppt[level_mask].mean()
                     total_weight[b] += self.level_weights[l]
 
+        # (TBD). intervention: give ppt to raw_loss
+        raw_loss = ppt
         return torch.where(total_weight > 0, total_loss / total_weight, torch.zeros_like(total_loss)), raw_loss
 
 
@@ -396,8 +398,6 @@ class GAT(nn.Module):
     #       - which led to such hidden bug (which leads to a shift-by-one permutation behaviour). Let's try again to see if it's fixed. 
 
     def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 1.0): 
-        # (TBD). I don't believe this level_groups uses '[MASK]' token to decide what to generate
-        #       - if it does, it shouldn't be used for general 'generate' function. 
 
         level_groups = batch_data.next_level_groups() 
 
@@ -412,14 +412,13 @@ class GAT(nn.Module):
 
     def _parallel_generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 1.0): 
 
-        # (TBD). Resample on [MASK] token positions
-
         level_groups = batch_data.get_pad_groups()  # (level, (batch_indices, mask_positions, timestamps))
 
         for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
             reprs = x[0, mask_positions] 
             new_tokens = self._decode(self.lm_heads[l_curr](reprs), temperature)
             for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
+                print(f" - generate level-{l_curr} token for sample {b} at timestamp {t}")
                 batch_data.insert_tokens(b, new_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
 
         return batch_data
