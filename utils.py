@@ -1028,3 +1028,31 @@ def draw_gif(frames, txt="DAT agent playing snake", path="./visual/dat_snake.gif
     anim = animation.FuncAnimation(fig, animate, frames=len(all_frames), interval=200, repeat=True)
     
     anim.save(path, writer='pillow')
+
+
+def compute_dynamic_threshold(perplexities: torch.Tensor, percentile: float = 75.0) -> float:
+    """Compute dynamic perplexity threshold based on population statistics"""
+    return torch.quantile(perplexities[perplexities > 0], percentile / 100.0).item()
+
+def update_critical_ts_dynamic(
+    batch_data: HierSeq,
+    perplexity_per_token: torch.Tensor,
+    percentile: float = 75.0,
+    momentum: float = 0.9,
+    prev_threshold: Optional[float] = None
+) -> tuple[torch.Tensor, float]:
+    """Update critical timestamps with dynamic threshold using momentum"""
+    current_threshold = compute_dynamic_threshold(perplexity_per_token, percentile)
+    if prev_threshold is not None:
+        threshold = momentum * prev_threshold + (1 - momentum) * current_threshold
+    else:
+        threshold = current_threshold
+    
+    critical_ts = infer_critical_ts(perplexity_per_token, batch_data, threshold)
+    
+    # Re-vitalize sequences if threshold dropped significantly
+    if prev_threshold and threshold < prev_threshold * 0.8:
+        mask = compute_cond_ratio(batch_data) > 0.9
+        critical_ts[mask] = init_critical_ts(batch_data)[mask]
+    
+    return critical_ts, threshold

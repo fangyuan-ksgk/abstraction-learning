@@ -5,6 +5,8 @@ from typing import Optional, Tuple, List
 from matplotlib.animation import FuncAnimation, PillowWriter
 import matplotlib.pyplot as plt
 
+# Visualizer function for n-body system
+# --------------------------------------------------------------------------------------------------------------------------
 def vis_nbody(
     positions: np.ndarray,
     masses: Optional[np.ndarray] = None,
@@ -314,328 +316,82 @@ def visualize_nbody_comparison(
     
     return fig
 
+# --------------------------------------------------------------------------------------------------------------------------
 
 
 
 
-# N-body data generation
-# ------------------------------------------------------------------------------------------------
+
 import rebound 
 
-def create_random_n_body(n=3, seed=42, com_center=True): 
-    """
-    Hyper-parameter tunable: range of position/velocity/mass
-    """
+def create_random_cartesian(n=3, seed=42, pos_range=2.0, vel_range=0.3, mass_range=(0.5, 2.0)):
+    """Random n-body using Cartesian coordinates (position/velocity)."""
     np.random.seed(seed)
-    sim = rebound.Simulation() 
-    sim.units = ('yr', 'AU', 'Msun')
-    for i in range(n): 
-        x = np.random.uniform(-2, 2)
-        y = np.random.uniform(-2, 2)
-        z = np.random.uniform(-0.5, 0.5)  # Mostly planar
-        
-        vx = np.random.uniform(-0.3, 0.3)
-        vy = np.random.uniform(-0.3, 0.3)
-        vz = np.random.uniform(-0.1, 0.1)
-        
-        mass = np.random.uniform(0.8, 10.0)
-        
-        sim.add(m=mass, x=x, y=y, z=z, vx=vx, vy=vy, vz=vz)
-
-    if com_center: 
-        sim.move_to_com() # center of mass as origin (relative position/velocity w.r.t. CoM presented)
-    
-    return sim
-
-
-def create_circular_binary(m1=1.0, m2=1.0, separation=1.0, com_center=True):
-    """Create two bodies in circular orbit around their center of mass."""
     sim = rebound.Simulation()
     sim.units = ('yr', 'AU', 'Msun')
     
-    # Calculate orbital velocity for circular orbit
-    total_mass = m1 + m2
-    r1 = separation * m2 / total_mass  # Distance of m1 from COM
-    r2 = separation * m1 / total_mass  # Distance of m2 from COM
-    
-    # Orbital velocity: v = sqrt(G*M/r) for reduced mass system
-    v1 = np.sqrt(sim.G * m2**2 / (total_mass * separation))
-    v2 = np.sqrt(sim.G * m1**2 / (total_mass * separation))
-    
-    sim.add(m=m1, x=-r1, y=0, z=0, vx=0, vy=v1, vz=0)
-    sim.add(m=m2, x=r2, y=0, z=0, vx=0, vy=-v2, vz=0)
-    
-    if com_center:
-        sim.move_to_com()
-    
-    return sim
-
-
-def create_hierarchical_triple(m_central=1.0, m_inner=0.1, m_outer=0.05, 
-                               a_inner=0.5, a_outer=3.0, com_center=True):
-    """Create stable hierarchical triple: central star with close and distant planets."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    sim.add(m=m_central)  # Central star
-    sim.add(m=m_inner, a=a_inner, e=0.01)  # Inner planet (circular)
-    sim.add(m=m_outer, a=a_outer, e=0.02)  # Outer planet (circular)
-    
-    if com_center:
-        sim.move_to_com()
-    
-    return sim
-
-
-def create_figure8_3body(high_precision=True):
-    """Create figure-8 with optional high precision."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    if high_precision:
-        # Use IAS15 integrator (15th order, adaptive timestep)
-        sim.integrator = "ias15"
-        sim.ri_ias15.epsilon = 1e-12  # Very high precision
-    else:
-        # Default WHFast (lower precision but faster)
-        sim.integrator = "whfast"
-        sim.dt = 0.001
-    
-    # Ultra-precise initial conditions (more decimal places)
-    sim.add(m=1.0, 
-            x=-0.97000436, 
-            y=0.24308753, 
-            z=0,
-            vx=-0.466203685/2, 
-            vy=-0.43236573/2, 
-            vz=0)
-    sim.add(m=1.0, 
-            x=0, 
-            y=0, 
-            z=0,
-            vx=0.466203685, 
-            vy=0.43236573, 
-            vz=0)
-    sim.add(m=1.0, 
-            x=0.97000436, 
-            y=-0.24308753, 
-            z=0,
-            vx=-0.466203685/2, 
-            vy=-0.43236573/2, 
-            vz=0)
+    for i in range(n):
+        sim.add(m=np.random.uniform(*mass_range),
+                x=np.random.uniform(-pos_range, pos_range),
+                y=np.random.uniform(-pos_range, pos_range),
+                z=np.random.uniform(-pos_range/4, pos_range/4),
+                vx=np.random.uniform(-vel_range, vel_range),
+                vy=np.random.uniform(-vel_range, vel_range),
+                vz=np.random.uniform(-vel_range/3, vel_range/3))
     
     sim.move_to_com()
     return sim
 
 
-def create_figure8_3body_precise():
-    """Ultra-precise figure-8 initial conditions from Simó (2002)."""
+def create_random_orbital(n=3, seed=42, a_range=(0.5, 5.0), e_range=(0, 0.3), mass_range=(0.1, 1.0)):
+    """Random n-body using orbital elements (hierarchical system)."""
+    np.random.seed(seed)
     sim = rebound.Simulation()
     sim.units = ('yr', 'AU', 'Msun')
-    sim.integrator = "ias15"
-    sim.ri_ias15.epsilon = 1e-14
     
-    # These are the most precise known values
-    x1 = -0.9700436
-    y1 = 0.24308753
-    vx = 0.4662036850
-    vy = 0.4323657300
+    # Central massive body
+    sim.add(m=np.random.uniform(1.0, 3.0))
     
-    sim.add(m=1.0, x=x1, y=y1, z=0, vx=vx/2, vy=vy/2, vz=0)
-    sim.add(m=1.0, x=-x1, y=-y1, z=0, vx=vx/2, vy=vy/2, vz=0)
-    sim.add(m=1.0, x=0, y=0, z=0, vx=-vx, vy=-vy, vz=0)
+    # Add orbiting bodies
+    for i in range(n-1):
+        sim.add(m=np.random.uniform(*mass_range),
+                a=np.random.uniform(*a_range),
+                e=np.random.uniform(*e_range),
+                inc=np.random.uniform(0, 0.1),  # Mostly planar
+                Omega=np.random.uniform(0, 2*np.pi),
+                omega=np.random.uniform(0, 2*np.pi),
+                f=np.random.uniform(0, 2*np.pi))
     
     sim.move_to_com()
     return sim
 
 
-def create_lagrange_triangle(m1=1.0, m2=1.0, m3=1.0, radius=1.0, com_center=True):
-    """Create three equal masses in stable Lagrange configuration."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    # First, add two bodies in circular orbit
-    sim.add(m=m1, x=-radius/2, y=0, z=0)
-    sim.add(m=m2, x=radius/2, y=0, z=0)
-    
-    # Calculate their mutual orbital velocity
-    v_orbit = np.sqrt(sim.G * (m1 + m2) / radius)
-    sim.particles[0].vy = v_orbit * m2/(m1+m2)
-    sim.particles[1].vy = -v_orbit * m1/(m1+m2)
-    
-    # Add third body at the L4 Lagrange point (60° ahead)
-    # L4 is at equal distance from both bodies
-    x3 = radius * np.cos(np.pi/3) - radius/2
-    y3 = radius * np.sin(np.pi/3)
-    
-    # For equal masses, the third body needs the same angular velocity
-    # Calculate velocity for circular motion around COM
-    r3_from_com = radius / np.sqrt(3)  # Distance from COM for equal masses
-    v3_mag = np.sqrt(sim.G * (m1 + m2 + m3) / (radius * np.sqrt(3)))
-    
-    # Velocity perpendicular to radius from COM
-    angle3 = np.arctan2(y3, x3 + radius/(2*(1 + m2/m1)))
-    vx3 = -v3_mag * np.sin(angle3)
-    vy3 = v3_mag * np.cos(angle3)
-    
-    sim.add(m=m3, x=x3, y=y3, z=0, vx=vx3, vy=vy3, vz=0)
-    
-    if com_center:
-        sim.move_to_com()
-    
-    return sim
+# N-body data pre-processing
+# --------------------------------------------------------------------------------------------------------------------------
 
-
-def create_pythagorean_3body():
-    """Create Pythagorean 3-body problem: masses in 3:4:5 ratio, zero initial velocity."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
+def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: bool = True) -> List[str]:
+    times, positions, _ = raw_data
+    n_bodies = positions.shape[1]
+    masses = np.ones(n_bodies)  # Default equal masses
     
-    # Classic Pythagorean problem setup
-    sim.add(m=3.0, x=1.0, y=3.0, z=0, vx=0, vy=0, vz=0)
-    sim.add(m=4.0, x=-2.0, y=-1.0, z=0, vx=0, vy=0, vz=0)
-    sim.add(m=5.0, x=1.0, y=-1.0, z=0, vx=0, vy=0, vz=0)
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_sitnikov_problem(m_binary=1.0, separation=1.0, m_test=0.001, z0=1.0):
-    """Create Sitnikov problem: test mass oscillating perpendicular to binary."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    # Binary in x-y plane
-    v_binary = np.sqrt(sim.G * m_binary / (2 * separation))
-    sim.add(m=m_binary, x=-separation/2, y=0, z=0, vx=0, vy=v_binary, vz=0)
-    sim.add(m=m_binary, x=separation/2, y=0, z=0, vx=0, vy=-v_binary, vz=0)
-    
-    # Test particle on z-axis
-    sim.add(m=m_test, x=0, y=0, z=z0, vx=0, vy=0, vz=0)
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_sun_earth_moon():
-    """Create realistic Sun-Earth-Moon system."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    # Actual masses in solar masses
-    m_sun = 1.0
-    m_earth = 3.003e-6  # Earth mass in solar masses
-    m_moon = 3.694e-8   # Moon mass in solar masses
-    
-    sim.add(m=m_sun)  # Sun at origin
-    sim.add(m=m_earth, a=1.0, e=0.0167)  # Earth at 1 AU
-    
-    # Moon orbiting Earth (simplified as circular)
-    moon_distance = 0.00257  # AU (384,400 km)
-    moon_velocity = 0.213  # AU/yr (1.022 km/s)
-    sim.add(m=m_moon, x=1.0 + moon_distance, y=0, z=0,
-            vx=0, vy=2*np.pi + moon_velocity, vz=0)
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_kozai_system(m_central=1.0, m_inner=0.001, m_perturber=0.5,
-                       a_inner=1.0, a_perturber=5.0, i_perturber=65):
-    """Create Kozai-Lidov system: inner body with inclined outer perturber."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    sim.add(m=m_central)  # Central star
-    sim.add(m=m_inner, a=a_inner, e=0.1)  # Inner body
-    
-    # Outer perturber with high inclination (Kozai mechanism)
-    i_rad = np.radians(i_perturber)
-    sim.add(m=m_perturber, a=a_perturber, e=0.1, inc=i_rad)
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_trojan_asteroids(m_sun=1.0, m_jupiter=0.001, n_trojans=5):
-    """Create Sun-Jupiter system with Trojan asteroids at L4/L5 points."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    # Sun and Jupiter
-    sim.add(m=m_sun)
-    sim.add(m=m_jupiter, a=5.2, e=0.05)  # Jupiter at 5.2 AU
-    
-    # Add Trojans near L4 point (60 degrees ahead of Jupiter)
-    for i in range(n_trojans):
-        # Small perturbations around L4
-        angle = np.radians(60 + np.random.uniform(-5, 5))
-        r = 5.2 + np.random.uniform(-0.1, 0.1)
-        sim.add(m=0, a=r, f=angle)  # Massless test particles
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_stable_lagrange(m_primary=1.0, m_secondary=0.3, separation=5.0):
-    """Create stable L4/L5 configuration (like Jupiter's Trojans)."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    
-    # Two main bodies in circular orbit
-    sim.add(m=m_primary)  # e.g., Sun
-    sim.add(m=m_secondary, a=separation)  # e.g., Jupiter
-    
-    # Add test particle at L4 (60 degrees ahead)
-    # This is MUCH more stable than equal masses
-    l4_angle = np.radians(60)
-    sim.add(m=0, a=separation, f=l4_angle)  # Massless at L4
-    
-    # Add test particle at L5 (60 degrees behind)
-    l5_angle = np.radians(-60)
-    sim.add(m=0, a=separation, f=l5_angle)  # Massless at L5
-    
-    sim.move_to_com()
-    return sim
-
-
-def create_broucke_orbit():
-    """Broucke's stable periodic orbit (more stable than figure-8)."""
-    sim = rebound.Simulation()
-    sim.units = ('yr', 'AU', 'Msun')
-    sim.integrator = "ias15"
-    
-    # Broucke A-15 orbit (stable periodic solution)
-    sim.add(m=1.0, x=0.336130, y=0, z=0, 
-            vx=0, vy=1.067877, vz=0)
-    sim.add(m=1.0, x=0.768469, y=0, z=0, 
-            vx=0, vy=-0.662036, vz=0)
-    sim.add(m=1.0, x=-1.104599, y=0, z=0, 
-            vx=0, vy=-0.405841, vz=0)
-    
-    sim.move_to_com()
-    return sim
+    sequences = []
+    for i in range(len(times) - n_context + 1):
+        lines = [f"M|{'|'.join([f'{m:.2f}' for m in masses])}"] if include_masses else []
+        lines += [f"{times[j]:.2f}|{'|'.join([f'{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}' for p in positions[j]])}" 
+                  for j in range(i, i + n_context)]
+        sequences.append("\n".join(lines))
+    return sequences
 
 
 def simulate_and_extract_data(sim, t_max=100, n_points=1001):
-    """
-    Simulate the system and extract positions and forces.
-    """
     times = np.linspace(0, t_max, n_points)
-    n = len(sim.particles)
-    positions = []
-    forces = []
-
+    n, G, positions, forces = len(sim.particles), sim.G, [], []
+    
     for t in times:
-        sim.integrate(t) # what does this do exactly? '.step(unit_time)' is not used, '.integrate(t)' is, why?
-        
-        # Extract positions
+        sim.integrate(t)
         pos = np.array([[p.x, p.y, p.z] for p in sim.particles])
         positions.append(pos)
-        
-        # Calculate forces
         force = np.zeros((n, 3))
-        G = sim.G
         for i in range(n):
             for j in range(n):
                 if i != j:
@@ -647,3 +403,63 @@ def simulate_and_extract_data(sim, t_max=100, n_points=1001):
     
     return times, np.array(positions), np.array(forces)
 
+
+def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, 
+                              n_sequences_per_pattern=100, include_masses=True):
+    
+    
+    patterns = patterns or ['cartesian', 'orbital']
+    all_sequences, metadata = [], []
+    
+    for pattern in patterns:
+        print(f"Generating {pattern} with n={n_bodies}, n_context={n_context}...")
+        n_instances = 10
+        
+        for instance in range(n_instances):
+            sim = (create_random_cartesian(n=n_bodies, seed=np.random.randint(10000)) 
+                   if pattern == 'cartesian' else 
+                   create_random_orbital(n=n_bodies, seed=np.random.randint(10000)))
+            
+            raw_data = simulate_and_extract_data(sim, t_max=10, 
+                                                n_points=n_sequences_per_pattern//n_instances + n_context)
+            sequences = prep_pretrain_minimal(raw_data, n_context, include_masses)
+            
+            all_sequences.extend(sequences)
+            metadata.extend([{'pattern': pattern, 'n_bodies': n_bodies, 'instance': instance,
+                            'n_context': n_context, 'has_masses': include_masses}] * len(sequences))
+    
+    return {'sequences': all_sequences, 'metadata': metadata,
+            'config': {'n_bodies': n_bodies, 'n_context': n_context, 
+                      'include_masses': include_masses, 'patterns': patterns}}
+
+
+
+# Test code
+# --------------------------------------------------------------------------------------------------------------------------
+def test(): 
+
+    sim = create_random_orbital(n=3, seed=42)
+    raw_data = simulate_and_extract_data(sim, t_max=2, n_points=50)
+
+    print("=" * 60)
+    print("MINIMAL FORMAT (with masses)")
+    print("=" * 60)
+    sequences = prep_pretrain_minimal(raw_data, n_context=4, include_masses=True)
+    print(sequences[0])
+
+    # Generate datasets with different context sizes
+    print("\n" + "=" * 60)
+    print("GENERATING DATASETS WITH DIFFERENT CONTEXTS")
+    print("=" * 60)
+
+    dataset = create_dataset_with_params(
+        patterns=['orbital'],
+        n_context=5,
+        n_sequences_per_pattern=10,
+        include_masses=True,
+    )
+
+    print(f"\nWith masses={False}:")
+    print(dataset['sequences'][0][:200] + "...")
+
+    return
