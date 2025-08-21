@@ -370,7 +370,7 @@ def create_random_orbital(n=3, seed=42, a_range=(0.5, 5.0), e_range=(0, 0.3), ma
 # N-body data pre-processing
 # --------------------------------------------------------------------------------------------------------------------------
 
-def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: bool = True) -> List[str]:
+def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: bool = True, round_to: int = 2) -> List[str]:
     times, positions, _ = raw_data
     n_bodies = positions.shape[1]
     masses = np.ones(n_bodies)  # Default equal masses
@@ -378,14 +378,14 @@ def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: b
     sequences = []
     for i in range(len(times) - n_context + 1):
         lines = [f"M|{'|'.join([f'{m:.2f}' for m in masses])}"] if include_masses else []
-        lines += [f"{times[j]:.2f}|{'|'.join([f'{p[0]:.4f},{p[1]:.4f},{p[2]:.4f}' for p in positions[j]])}" 
+        lines += [f"{times[j]:.2f}|{'|'.join([f'{p[0]:.{round_to}f},{p[1]:.{round_to}f},{p[2]:.{round_to}f}' for p in positions[j]])}" 
                   for j in range(i, i + n_context)]
         sequences.append("\n".join(lines))
     return sequences
 
 
-def simulate_and_extract_data(sim, t_max=100, n_points=1001):
-    times = np.linspace(0, t_max, n_points)
+def simulate_and_extract_data(sim, t_max=100, n_points=1001, stride=1):
+    times = np.linspace(0, t_max, n_points // stride)
     n, G, positions, forces = len(sim.particles), sim.G, [], []
     
     for t in times:
@@ -405,7 +405,8 @@ def simulate_and_extract_data(sim, t_max=100, n_points=1001):
     return times, np.array(positions), np.array(forces)
 
 
-def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, include_masses=True):
+def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, include_masses=True, stride=1,
+                               round_to=2):
     
     patterns = patterns or ['cartesian', 'orbital']
     all_sequences, metadata = [], []
@@ -419,9 +420,9 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, in
                    if pattern == 'cartesian' else 
                    create_random_orbital(n=n_bodies, seed=np.random.randint(10000)))
             
-            raw_data = simulate_and_extract_data(sim, t_max=T, n_points= T*10 + 1)
+            raw_data = simulate_and_extract_data(sim, t_max=T, n_points= T*10 + stride, stride=stride)
 
-            sequences = prep_pretrain_minimal(raw_data, n_context, include_masses)
+            sequences = prep_pretrain_minimal(raw_data, n_context, include_masses, round_to)
             
             all_sequences.extend(sequences)
             metadata.extend([{'pattern': pattern, 'n_bodies': n_bodies, 'instance': instance,
@@ -432,33 +433,67 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, in
                       'include_masses': include_masses, 'patterns': patterns}}
 
 
+class TinyTokenizer: 
+    def __init__(self):
+        chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 
+                 '.', '|', 'M', '\n', '-', ',']
+        self.vocab = {char: i for i, char in enumerate(chars)}
+        self.inverse_vocab = {i: char for char, i in self.vocab.items()}
+        self.vocab_size = len(self.vocab)
 
-# Test code
+    def encode(self, seq: str):
+        return [self.vocab[c] for c in seq if c in self.vocab]
+    
+    def decode(self, tokens: list):
+        return ''.join([self.inverse_vocab[t] for t in tokens if t in self.inverse_vocab])
+    
+    def __call__(self, seq: str):
+        return self.encode(seq)
+
+
+
+
+# Example Code
 # --------------------------------------------------------------------------------------------------------------------------
-def test(): 
 
-    sim = create_random_orbital(n=3, seed=42)
-    raw_data = simulate_and_extract_data(sim, t_max=2, n_points=50)
+def simulate(): 
+    sim = create_random_orbital(n=6, seed=1)
+    # sim = create_random_cartesian(n=6, seed=42)
 
-    print("=" * 60)
-    print("MINIMAL FORMAT (with masses)")
-    print("=" * 60)
-    sequences = prep_pretrain_minimal(raw_data, n_context=4, include_masses=True)
-    print(sequences[0])
+    raw_data = simulate_and_extract_data(sim, t_max=30, n_points=301)
 
-    # Generate datasets with different context sizes
-    print("\n" + "=" * 60)
-    print("GENERATING DATASETS WITH DIFFERENT CONTEXTS")
-    print("=" * 60)
+    # Visualize dynamics (Now make em dance!)
+    # Six body
+    ts, positions, forces = raw_data
+    masses = np.array([p.m for p in sim.particles])
+    create_nbody_gif(ts, positions, None, masses,
+                    labels=['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'],
+                    body_colors=['#FFFF00', '#00FF00', '#0000FF', '#FF0000', '#0000FF', '#00FF00'],
+                    figsize=(10, 8),
+                    legend_scale=1.6,
+                    trail_steps=30,  # Show last 30 timesteps as trail
+                    force_scale=0.001,
+                    save_path='6body.gif')
+
+
+def gen(): 
+    """
+    Lever: 
+    1. n_context: control # of in-context samples
+    2. stride: control Delta t between samples
+    3. T: control total time of simulation
+    4. patterns: control the type of simulation (cartesian, orbital), orbital is hiearchical system with one dominating body
+    6. n_bodies: control the number of bodies in the simulation
+    """
 
     dataset = create_dataset_with_params(
+        n_bodies=3,
         patterns=['orbital'],
-        n_context=5,
-        n_sequences_per_pattern=10,
+        n_context=3,
+        stride=1,
+        T=1000,
         include_masses=True,
     )
 
-    print(f"\nWith masses={False}:")
-    print(dataset['sequences'][0][:200] + "...")
-
-    return
+    tok = TinyTokenizer()
+    s_enc = tok(dataset['sequences'][0])
