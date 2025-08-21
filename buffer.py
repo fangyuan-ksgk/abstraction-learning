@@ -3,8 +3,11 @@
 import numpy as np 
 import struct 
 import os
+from utils import HierSeq 
+import torch 
 
-def write_buffer_shard(filename, samples):
+# (TBD). No timestamp is saved yet. This requires change when sparse memory is included. 
+def write_shard(filename, samples):
     header = np.zeros(256, dtype=np.int32)
     header[0], header[1], header[2] = 20241220, 1, len(samples)
     
@@ -22,8 +25,8 @@ def write_buffer_shard(filename, samples):
                 if tokens:
                     f.write(np.array(tokens, dtype=np.int32).tobytes())
 
-
-def load_buffer_shard(filename):
+# (TBD). No timestamp is loaded yet. This requires change when sparse memory is included. 
+def load_shard(filename):
     with open(filename, 'rb') as f:
         header = np.frombuffer(f.read(1024), dtype=np.int32)
         mm = np.memmap(filename, dtype='uint8', mode='r', offset=1024)
@@ -45,81 +48,59 @@ def load_buffer_shard(filename):
     return samples
 
 
-def update_sample_in_shard(filename, sample_idx, new_hier_seq):
+def update_shard(filename, sample_idx, new_hier_seq):
     """
     Shard-level rewrites (Room for optimization)
     """
-    samples = load_buffer_shard(filename)
+    samples = load_shard(filename)
     
     old_sample_len, _ = samples[sample_idx]
     samples[sample_idx] = (old_sample_len, new_hier_seq)
     
-    write_buffer_shard(filename, samples)
+    write_shard(filename, samples)
 
 
-
-# class ShardedBufferManager:
-#     """Manage multiple buffer shards with updates."""
+# (TBD). No timestamp is maintained yet. This requires change when sparse memory is included. 
+class Buffer: 
     
-#     def __init__(self, shard_pattern='buffer_*.bin', cache_size=2):
-#         self.files = sorted(glob.glob(shard_pattern))
-#         if not self.files:
-#             raise ValueError(f"No files found matching {shard_pattern}")
+    def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=0.2): 
+        self.pool = load_shard(file_path)
+        self.max_length = max_length
+        self.cr = np.array([0. for _ in range(len(self.pool))]) # control rate per sample
+        self.ppl = np.array([0. for _ in range(len(self.pool))]) # perplexity per sample
+        self.ppl_thres_percentile = ppl_thres_percentile
+        self.K, self.L = K, L
+
+    @property
+    def ppl_thres(self): 
+        return np.percentile(self.ppl, self.ppl_thres_percentile)
+
+    def get_batch(self):
+
+        sorted_indices = sorted(range(len(self.pool)), key=lambda i: (self.cr[i], self.ppl[i]))
+
+        batch = []
+        curr_len = 0
+        selected_indices = []
         
-#         self.cache = {}  # filename -> (header, samples)
-#         self.cache_size = cache_size
-#         self.file_iter = itertools.cycle(self.files)
+        for idx in sorted_indices:
+            sample_len, hier_seq = self.pool[idx]
+            if curr_len + sample_len > self.max_length:
+                break
+            batch.append((hier_seq, None))
+            curr_len += sample_len
+            selected_indices.append(idx)
         
-#     def get_batch(self, max_length, L, K):
-#         """Get batch from shards with cycling."""
-#         while True:
-#             filename = next(self.file_iter)
-            
-#             # Load with caching
-#             if filename not in self.cache:
-#                 if len(self.cache) >= self.cache_size:
-#                     # Evict oldest
-#                     self.cache.pop(next(iter(self.cache)))
-#                 self.cache[filename] = load_buffer_shard(filename)
-            
-#             header, samples = self.cache[filename]
-            
-#             # Build batch
-#             batch = []
-#             curr_len = 0
-#             indices = np.random.permutation(len(samples))
-            
-#             for idx in indices:
-#                 sample_len, hier_seq = samples[idx]
-#                 if curr_len + sample_len > max_length:
-#                     break
-#                 batch.append((hier_seq, None))
-#                 curr_len += sample_len
-            
-#             if batch:
-#                 return HierSeq.from_hierarchical_data(batch, K, L), filename, indices[:len(batch)]
-    
-#     def update_samples(self, filename, indices, batch_data):
-#         """Update abstract tokens for samples in batch."""
-#         if filename in self.cache:
-#             _, samples = self.cache[filename]
-            
-#             for i, idx in enumerate(indices):
-#                 sample_mask = batch_data.sample_idx == i
-#                 sample_len, old_hier = samples[idx]
-                
-#                 # Extract updated hierarchy
-#                 new_hier = [old_hier[0]]  # Keep level 0
-#                 for l in range(1, batch_data.L):
-#                     level_mask = sample_mask & (batch_data.levels == l)
-#                     if level_mask.any():
-#                         new_hier.append(batch_data.tokens[level_mask].cpu().numpy().tolist())
-#                     else:
-#                         new_hier.append([])
-                
-#                 samples[idx] = (sample_len, new_hier)
-            
-#             # Write back to disk
-#             write_buffer_shard(filename, samples)
-#             # Update cache
-#             self.cache[filename] = (self.cache[filename][0], samples)
+        return HierSeq.from_hierarchical_data(batch, self.K, self.L, sample_indices=selected_indices)
+
+    def update(self, hseq: HierSeq, cr: torch.Tensor, ppl: torch.Tensor): 
+
+        indices = torch.unique(hseq.sample_idx, sorted=True)
+
+        for idx, cr_val, ppl_val in zip(indices, cr, ppl): 
+            # (TBD) .to_hierarchical_data() is not implemented yet
+            self.pool[idx] = (self.pool[idx][0], hseq.to_hierarchical_data()[idx])
+            self.cr[idx] = cr_val
+            self.ppl[idx] = ppl_val
+
+        write_shard(self.file_path, self.pool)

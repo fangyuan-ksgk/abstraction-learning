@@ -71,14 +71,18 @@ class HierSeq:
     L: int 
     
     @classmethod
-    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int):
+    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int,
+                              sample_indices: Optional[torch.Tensor] = None):
 
         batch_tokens = []
         batch_levels = []
         batch_timestamps = []
         batch_sample_idx = []
+
+        assert sample_indices is None or len(sample_indices) == len(samples_data), \
+            "sample_indices must be None or have the same length as samples_data"
         
-        for token_seqs, timestamp_seqs in samples_data:
+        for i, (token_seqs, timestamp_seqs) in enumerate(samples_data):
 
             tokens, levels, timestamps = cls._flatten_single_sample(
                 token_seqs, timestamp_seqs, K, L
@@ -87,8 +91,13 @@ class HierSeq:
             batch_tokens.append(tokens)
             batch_levels.append(levels)
             batch_timestamps.append(timestamps)
-            sample_idx = batch_sample_idx[-1] + 1 if batch_sample_idx else 0
-            batch_sample_idx += [sample_idx] * len(tokens)
+            
+            if sample_indices is None: 
+                sample_idx = batch_sample_idx[-1] + 1 if batch_sample_idx else 0
+                batch_sample_idx += [sample_idx] * len(tokens)
+            else: 
+                sample_idx = sample_indices[i]
+                batch_sample_idx += [sample_idx] * len(tokens)
 
         return cls(
             tokens=torch.cat(batch_tokens),
@@ -99,6 +108,19 @@ class HierSeq:
             K=K,
             L=L
         )
+    
+    # (TBD). provide 'timestamps' as well 
+    def to_hierarchical_data(self):     
+        samples = []
+        sample_indices = torch.unique(self.sample_idx, sorted=True)
+        for idx in sample_indices: 
+            sample = []
+            for l in range(self.L): 
+                sample_level_mask = (self.sample_idx == idx) & (self.levels == l)
+                sample_level_tokens = self.tokens[sample_level_mask]
+                sample.append(sample_level_tokens.tolist())
+            samples.append(sample)
+        return samples
     
 
     @staticmethod
