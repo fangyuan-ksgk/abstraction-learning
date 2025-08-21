@@ -324,6 +324,7 @@ def visualize_nbody_comparison(
 
 import rebound 
 
+
 def create_random_cartesian(n=3, seed=42, pos_range=2.0, vel_range=0.3, mass_range=(0.5, 2.0)):
     """Random n-body using Cartesian coordinates (position/velocity)."""
     np.random.seed(seed)
@@ -404,9 +405,7 @@ def simulate_and_extract_data(sim, t_max=100, n_points=1001):
     return times, np.array(positions), np.array(forces)
 
 
-def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, 
-                              n_sequences_per_pattern=100, include_masses=True):
-    
+def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, include_masses=True):
     
     patterns = patterns or ['cartesian', 'orbital']
     all_sequences, metadata = [], []
@@ -420,8 +419,8 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5,
                    if pattern == 'cartesian' else 
                    create_random_orbital(n=n_bodies, seed=np.random.randint(10000)))
             
-            raw_data = simulate_and_extract_data(sim, t_max=10, 
-                                                n_points=n_sequences_per_pattern//n_instances + n_context)
+            raw_data = simulate_and_extract_data(sim, t_max=T, n_points= T*10 + 1)
+
             sequences = prep_pretrain_minimal(raw_data, n_context, include_masses)
             
             all_sequences.extend(sequences)
