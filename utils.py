@@ -6,6 +6,8 @@ from IPython.display import clear_output
 from matplotlib import pyplot as plt 
 import matplotlib.animation as animation
 from collections import defaultdict
+import numpy as np 
+import struct 
 
 
 # Generation Helper functions: Decide the next token level & timestamp to generate 
@@ -381,6 +383,14 @@ def compute_cond_ratio(batch_data: HierSeq):
 
     return torch.tensor(cond_ratios)
 
+def compute_sample_len(seq: list, L: int, K: int) -> int:
+    """Compute sample length without creating HierSeq object."""
+    seq_len = len(seq)
+    total = seq_len
+    for l in range(1, L):
+        total += (seq_len - 1) // (K ** l) + 1
+    return total + 1
+
 def pad_abstract_tokens(batch_data: HierSeq, 
                         critical_timestamps: Optional[torch.Tensor] = None,
                         t_pad: Optional[int] = None): 
@@ -478,6 +488,55 @@ def merge_prefix(prefix_batch, original_batch, mask_token=MASK_TOK):
         n_replaced += 1
 
     return n_replaced
+
+
+def save_tokenized_binary(sequences, tokenizer, sample_len, output_path='nbody.bin'):
+    """Minimal binary save."""
+    with open(output_path, 'wb') as f:
+        f.write(struct.pack('I', len(sequences)))  # Number of sequences
+        
+        for seq in sequences:
+            tokens = tokenizer(seq)
+            tokens = [sample_len] + tokens
+            f.write(struct.pack('I', len(tokens)))  # Length of sequence
+            f.write(np.array(tokens, dtype=np.int32).tobytes())  # Token data
+    
+    print(f"Saved {len(sequences)} sequences to {output_path}")
+
+def load_tokenized_binary(path):
+    """Minimal binary load."""
+    sequences = []
+    
+    with open(path, 'rb') as f:
+        n_sequences = struct.unpack('I', f.read(4))[0]
+        
+        for _ in range(n_sequences):
+            sample_len = struct.unpack('I', f.read(4))[0]
+            length = struct.unpack('I', f.read(4))[0]
+            tokens = np.frombuffer(f.read(length * 4), dtype=np.int32)
+            sequences.append((sample_len, tokens.tolist()))  # Convert to list if needed
+    
+    return sequences
+
+
+# (TBD). This function assumes 'sequences' misses abstract tokens
+#        During training, we need get_batch from buffer which has
+#        abstract tokens
+def get_batch(max_length, sequences, L, K):
+    rand_idx = np.random.randint(0, len(sequences))
+    batch = []
+    curr_len = 0
+    
+    for offset in range(len(sequences)):
+        idx = (rand_idx + offset) % len(sequences) 
+        sample_len, seq = sequences[idx]
+        if curr_len + sample_len > max_length:
+            break
+        batch.append(([seq] + [[] for _ in range(1, L)], None))
+        curr_len += sample_len
+    
+    batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L)
+    return batch_data
 
 
 # --------------------------------------------------------------------------------------------------------------------------
