@@ -271,10 +271,14 @@ class HierSeq:
             sample_timestamps = self.timestamps[sample_mask]
             sample_levels = self.levels[sample_mask]
 
+    @property 
+    def indices(self): 
+        return torch.unique(self.sample_idx, sorted=True)
+
     def next_level_groups(self): 
 
         level_groups = defaultdict(list) 
-        for b in range(self.batch_size): 
+        for b in self.indices: 
             mask = self.sample_idx == b
             l_next, t_next = get_next_token_level(
                 self.levels[mask], self.timestamps[mask], self.K, self.L
@@ -288,7 +292,7 @@ class HierSeq:
 
         abs_groups = defaultdict(list)
 
-        for b in range(self.batch_size): 
+        for b in self.indices: 
             mask = self.sample_idx == b
             sample_levels = self.levels[mask]
             sample_timestamps = self.timestamps[mask]
@@ -315,7 +319,7 @@ class HierSeq:
         
         pad_groups = defaultdict(list)
 
-        for b in range(self.batch_size): 
+        for b in self.indices: 
             mask = self.sample_idx == b
             sample_levels = self.levels[mask]
             sample_timestamps = self.timestamps[mask]
@@ -354,10 +358,10 @@ class HierSeq:
 # Caveat: we don't add abstract token at last timestamp, it only explains non-existing future trajectories
 
 def init_critical_ts(batch_data: HierSeq) -> torch.Tensor:
+
     critical_ts = torch.full((batch_data.batch_size,), -1.0, device=batch_data.tokens.device, dtype=torch.int)
-    
-    for b in range(batch_data.batch_size):
-        mask = batch_data.sample_idx == b
+    for loc_idx, glob_idx in enumerate(batch_data.indices):
+        mask = batch_data.sample_idx == glob_idx
         ts, levels = batch_data.timestamps[mask], batch_data.levels[mask]
         
         for l in range(1, batch_data.L):
@@ -368,7 +372,7 @@ def init_critical_ts(batch_data: HierSeq) -> torch.Tensor:
             missing = expected_ts[~torch.isin(expected_ts, existing_ts)]
             
             if missing.numel() > 0:
-                critical_ts[b] = missing.min().int()
+                critical_ts[loc_idx] = missing.min().int()
                 break  
     
     return critical_ts
@@ -384,19 +388,19 @@ def infer_critical_ts(
     """
     critical_timestamps = init_critical_ts(batch_data)
 
-    for b in range(batch_data.batch_size):
-        sample_perp_mask = (batch_data.sample_idx[1:] == b) & (perplexity_per_token > p_thres) & (batch_data.levels[1:] == 0)
+    for loc_idx, glob_idx in enumerate(batch_data.indices):
+        sample_perp_mask = (batch_data.sample_idx[1:] == glob_idx) & (perplexity_per_token > p_thres) & (batch_data.levels[1:] == 0)
         if sample_perp_mask.any():
             high_perp_ts = batch_data.timestamps[1:][sample_perp_mask][0]
-            critical_timestamps[b] = high_perp_ts - 1
+            critical_timestamps[loc_idx] = high_perp_ts - 1
     return critical_timestamps
 
 
 def compute_cond_ratio(batch_data: HierSeq): 
 
     cond_ratios = []
-    for b in range(batch_data.batch_size): 
-        sample_mask = batch_data.sample_idx == b 
+    for glob_idx in batch_data.indices: 
+        sample_mask = batch_data.sample_idx == glob_idx 
         abs_mask = (batch_data.levels > 0) & (batch_data.tokens != MASK_TOK)
         abs_count = (sample_mask & abs_mask).sum()
 
@@ -420,18 +424,18 @@ def pad_abstract_tokens(batch_data: HierSeq,
                         critical_timestamps: Optional[torch.Tensor] = None,
                         t_pad: Optional[int] = None): 
     """Explanation-based resampling helper function"""
-    for b in range(batch_data.batch_size): 
-        mask = batch_data.sample_idx == b
+    for loc_idx, glob_idx in enumerate(batch_data.indices): 
+        mask = batch_data.sample_idx == glob_idx
         sample_timestamps = batch_data.timestamps[mask]
         start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
-        crit_ts = critical_timestamps[b] if critical_timestamps is not None else start_ts
+        crit_ts = critical_timestamps[loc_idx] if critical_timestamps is not None else start_ts
         
         if crit_ts == -1: continue
         if t_pad: end_ts = min(end_ts, max(start_ts, crit_ts) + t_pad)
 
         for l in range(1, batch_data.L):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
-            batch_data.insert_tokens(b, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= crit_ts])
+            batch_data.insert_tokens(glob_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= crit_ts])
 
 
 def remove_pad_tokens(batch_data: HierSeq): 
@@ -446,8 +450,7 @@ def remove_pad_tokens(batch_data: HierSeq):
 def slice_prefix_before_pad(hierseq, pad_token=MASK_TOK):
 
     prefix_indices = []
-    
-    for b in range(hierseq.batch_size):
+    for b in hierseq.indices: 
         sample_mask = hierseq.sample_idx == b
         sample_levels = hierseq.levels[sample_mask]
         sample_positions = torch.where(sample_mask)[0]
@@ -480,7 +483,7 @@ def merge_prefix(prefix_batch, original_batch, mask_token=MASK_TOK):
     """Assume one extra abstract token generated in prefix HierSeq, use it to replace [MASK] token in original HierSeq"""
     
     n_replaced = 0
-    for b in range(original_batch.batch_size):
+    for b in original_batch.indices: 
 
         orig_mask = original_batch.sample_idx == b
         prefix_mask = prefix_batch.sample_idx == b
@@ -772,7 +775,8 @@ def create_traj_loss_mask(batch_data: HierTraj):
 
     batch_data.batch_size
     loss_mask_state, loss_mask_action = [], [] 
-    for b in range(batch_data.batch_size): 
+    indices = torch.unique(batch_data.sample_idx, sorted=True)
+    for b in indices: 
 
         sample_tokens = tokens[sample_idx == b]
         ft = sample_tokens[0].item() 

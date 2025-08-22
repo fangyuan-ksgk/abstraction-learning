@@ -338,15 +338,16 @@ class GAT(nn.Module):
 
     def _compute_hseq_loss(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
         ppt = self._compute_ppt(x, batch_data)
-        weighted_loss, raw_loss = self._compute_weighted_loss(batch_data, ppt)
+        weighted_loss = self._compute_weighted_loss(batch_data, ppt)
         return weighted_loss.mean()
 
     def _evaluate_hseq_perplexity(self, x: torch.Tensor, batch_data: HierSeq, p_thres: float = None) -> tuple:
-        ppt = self._compute_ppt(x, batch_data)
-        weighted_loss, raw_loss = self._compute_weighted_loss(batch_data, ppt)
-        critical_timestamps = infer_critical_ts(ppt, batch_data, p_thres)
-        cr_per_sample = compute_cond_ratio(batch_data)
-        return weighted_loss, raw_loss, critical_timestamps, cr_per_sample
+        with torch.no_grad():
+            ppt = self._compute_ppt(x, batch_data)
+            weighted_loss = self._compute_weighted_loss(batch_data, ppt)
+            critical_timestamps = infer_critical_ts(ppt.detach(), batch_data, p_thres)
+            cr_per_sample = compute_cond_ratio(batch_data)
+            return weighted_loss, critical_timestamps, cr_per_sample
 
 
     def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
@@ -373,24 +374,22 @@ class GAT(nn.Module):
 
         return ppt
 
-    def _compute_weighted_loss(self, batch_data: HierSeq, ppt: torch.Tensor) -> tuple:
+    def _compute_weighted_loss(self, batch_data: HierSeq, ppt: torch.Tensor) -> torch.Tensor:
      
         total_loss = torch.zeros(batch_data.batch_size, device=self.device)
         total_weight = torch.zeros(batch_data.batch_size, device=self.device)
         raw_loss = defaultdict(lambda: defaultdict(float))
 
-        for b in range(batch_data.batch_size): 
-            sample_mask = batch_data.sample_idx[1:] == b
+        for loc_idx, glob_idx in enumerate(batch_data.indices): 
+            sample_mask = batch_data.sample_idx[1:] == glob_idx
             for l in range(self.L): 
                 level_mask = (batch_data.levels[1:] == l) & sample_mask & (ppt > 0)
-                raw_loss[b][l] = ppt[level_mask].mean().item() if level_mask.any() else 0.0
+                raw_loss[loc_idx][l] = ppt[level_mask].mean().item() if level_mask.any() else 0.0
                 if level_mask.any():
-                    total_loss[b] += self.level_weights[l] * ppt[level_mask].mean()
-                    total_weight[b] += self.level_weights[l]
+                    total_loss[loc_idx] += self.level_weights[l] * ppt[level_mask].mean()
+                    total_weight[loc_idx] += self.level_weights[l]
 
-        # (TBD). intervention: give ppt to raw_loss
-        raw_loss = ppt
-        return torch.where(total_weight > 0, total_loss / total_weight, torch.zeros_like(total_loss)), raw_loss
+        return torch.where(total_weight > 0, total_loss / total_weight, torch.zeros_like(total_loss))
 
 
     # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
