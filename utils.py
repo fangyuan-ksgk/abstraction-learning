@@ -109,18 +109,21 @@ class HierSeq:
             L=L
         )
     
-    # (TBD). provide 'timestamps' as well 
     def to_hierarchical_data(self):     
         samples = []
+        timestamps = []
         sample_indices = torch.unique(self.sample_idx, sorted=True)
         for idx in sample_indices: 
-            sample = []
+            sample, timestamp = [], []
             for l in range(self.L): 
                 sample_level_mask = (self.sample_idx == idx) & (self.levels == l)
                 sample_level_tokens = self.tokens[sample_level_mask]
+                sample_level_timestamps = self.timestamps[sample_level_mask]
                 sample.append(sample_level_tokens.tolist())
-            samples.append(sample)
-        return samples
+                timestamp.append(sample_level_timestamps.tolist())
+            samples.append((sample, timestamp))
+            timestamps.append(timestamp)
+        return samples, timestamps
     
 
     @staticmethod
