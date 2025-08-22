@@ -108,4 +108,5 @@ class Buffer:
             self.cr[global_idx] = cr[loc_idx]
             self.ppl[global_idx] = ppl[loc_idx]
 
+    def write_to_file(self): 
         write_shard(self.file_path, self.pool, self.timestamps)  # Pass timestamps too
