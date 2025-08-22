@@ -98,12 +98,14 @@ class Buffer:
 
         indices = torch.unique(hseq.sample_idx, sorted=True)
 
-        for idx, cr_val, ppl_val in zip(indices, cr, ppl): 
-            sample_len = self.pool[idx][0]
-            sample_hier_seq, sample_timestamp = hseq.to_hierarchical_data()[idx]
-            self.pool[idx] = (sample_len, sample_hier_seq)
-            self.timestamps[idx] = sample_timestamp
-            self.cr[idx] = cr_val
-            self.ppl[idx] = ppl_val
+        batch_seqs, batch_ts = hseq.to_hierarchical_data()
+
+        for loc_idx, global_idx in enumerate(indices): 
+            sample_len = self.pool[global_idx][0]
+            sample_hier_seq, sample_ts = batch_seqs[loc_idx], batch_ts[loc_idx]
+            self.pool[global_idx] = (sample_len, sample_hier_seq)
+            self.timestamps[global_idx] = sample_ts
+            self.cr[global_idx] = cr[loc_idx]
+            self.ppl[global_idx] = ppl[loc_idx]
 
         write_shard(self.file_path, self.pool, self.timestamps)  # Pass timestamps too

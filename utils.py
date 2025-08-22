@@ -121,7 +121,7 @@ class HierSeq:
                 sample_level_timestamps = self.timestamps[sample_level_mask]
                 sample.append(sample_level_tokens.tolist())
                 timestamp.append(sample_level_timestamps.tolist())
-            samples.append((sample, timestamp))
+            samples.append(sample)
             timestamps.append(timestamp)
         return samples, timestamps
     
