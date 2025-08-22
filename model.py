@@ -417,7 +417,7 @@ class GAT(nn.Module):
             reprs = x[0, mask_positions] 
             new_tokens = self._decode(self.lm_heads[l_curr](reprs), temperature)
             for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
-                print(f" - generate level-{l_curr} token for sample {b} at timestamp {t}")
+                # print(f" - generate level-{l_curr} token for sample {b} at timestamp {t}")
                 batch_data.insert_tokens(b, new_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
 
         return batch_data

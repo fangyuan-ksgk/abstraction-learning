@@ -168,7 +168,7 @@ class HierSeq:
     def get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get a single sample by index."""
         
-        mask = (self.sample_idx == idx)
+        mask = (self.sample_idx == self.indices[idx])
         
         return (
             self.tokens[mask],
@@ -338,7 +338,11 @@ class HierSeq:
 
         combined_groups = {} 
         for level, group in pad_groups.items(): 
-            combined_groups[level] = (torch.cat([b for b, _, _ in group]), torch.cat([ind for _, ind, _ in group]), torch.cat([t for _, _, t in group]))
+            batch_indices = torch.cat([b for b, _, _ in group])
+            mask_positions = torch.cat([ind for _, ind, _ in group])
+            timestamps = torch.cat([t for _, _, t in group])
+            assert batch_indices.size(0) == mask_positions.size(0) == timestamps.size(0), "mismatching batch_indices, mask_positions, timestamps number"
+            combined_groups[level] = (batch_indices, mask_positions, timestamps)
 
         return combined_groups 
 
@@ -431,7 +435,8 @@ def pad_abstract_tokens(batch_data: HierSeq,
         crit_ts = critical_timestamps[loc_idx] if critical_timestamps is not None else start_ts
         
         if crit_ts == -1: continue
-        if t_pad: end_ts = min(end_ts, max(start_ts, crit_ts) + t_pad)
+        crit_ts = max(start_ts, crit_ts)
+        if t_pad: end_ts = min(end_ts, crit_ts + t_pad)
 
         for l in range(1, batch_data.L):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
