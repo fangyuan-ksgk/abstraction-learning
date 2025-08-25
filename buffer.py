@@ -131,7 +131,8 @@ class Buffer:
 
         # perturbate on index selection
         cr_range = np.max(self.cr) - np.min(self.cr) + 1e-8
-        ppl_range = np.max(self.ppl[np.isfinite(self.ppl)]) - np.min(self.ppl[np.isfinite(self.ppl)]) + 1e-8        
+        finite_ppl = self.ppl[np.isfinite(self.ppl)]
+        ppl_range = np.max(finite_ppl) - np.min(finite_ppl) + 1e-8 if len(finite_ppl) > 0 else 1.0
         cr_noise = np.random.randn(len(self.pool)) * cr_range * noise_scale
         ppl_noise = np.random.randn(len(self.pool)) * ppl_range * noise_scale
         

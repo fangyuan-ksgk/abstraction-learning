@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-from constant import PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
+from constant import MASK_TOK, PLACE_HOLDER_STATE_TOK, PLACE_HOLDER_ACTION_TOK
 from utils import (
     get_next_token_level, HierSeq, HierTraj, create_loss_mask,
     make_interleave_embd, create_traj_loss_mask, get_next_traj_token,
@@ -422,12 +422,17 @@ class GAT(nn.Module):
 
         return batch_data
 
-    def _decode(self, logits: torch.Tensor, temperature: float = 0.0):
+    def _decode(self, logits: torch.Tensor, temperature: float = 0.0, mask_token_id: int = MASK_TOK):
+
         if temperature == 0.0:
+            if mask_token_id is not None:
+                logits[:, mask_token_id] = float('-inf')
             return torch.argmax(30 * torch.tanh(logits / 30), dim=-1)
         else: 
             logits = 30 * torch.tanh(logits / 30)
             logits = logits.float()
+            if mask_token_id is not None:
+                logits[:, mask_token_id] = float('-inf')
             return torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
 
 
