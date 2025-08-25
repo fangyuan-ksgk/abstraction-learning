@@ -127,34 +127,18 @@ class Buffer:
             return float('inf')  # If no finite values, return inf
         return np.percentile(finite_ppl, self.ppl_thres_percentile)
 
-    # (TBD). Debugging purpose only, to be removed 
-    def slice_batch(self, sorted_indices: list, pad: bool = True, t_search: int = 2):
+    def get_batch(self, pad: bool = True, t_search: int = 2, noise_scale: float = 0.1):
 
-        batch = []
-        curr_len = 0
-        selected_indices = []
+        # perturbate on index selection
+        cr_range = np.max(self.cr) - np.min(self.cr) + 1e-8
+        ppl_range = np.max(self.ppl[np.isfinite(self.ppl)]) - np.min(self.ppl[np.isfinite(self.ppl)]) + 1e-8        
+        cr_noise = np.random.randn(len(self.pool)) * cr_range * noise_scale
+        ppl_noise = np.random.randn(len(self.pool)) * ppl_range * noise_scale
         
-        for idx in sorted_indices:
-            sample_len, hier_seq = self.pool[idx]
-            timestamp = self.timestamps[idx]
-            ppl = self.ppl[idx]
-            if curr_len + sample_len > self.max_length:
-                break
-            batch.append((hier_seq, timestamp))
-            curr_len += sample_len
-            selected_indices.append(idx)
-
-        batch_data = HierSeq.from_hierarchical_data(batch, self.K, self.L, sample_indices=selected_indices)
-        if pad: 
-            cts = self.cts[selected_indices]
-            pad_abstract_tokens(batch_data, cts, t_search)
-
-        return batch_data
-
-    def get_batch(self, pad: bool = True, t_search: int = 2):
-
-        sorted_indices = sorted(range(len(self.pool)), key=lambda i: (self.cr[i], self.ppl[i]))
-
+        sorted_indices = sorted(range(len(self.pool)), 
+                              key=lambda i: (self.cr[i] + cr_noise[i], 
+                                           self.ppl[i] + ppl_noise[i]))
+        
         batch = []
         curr_len = 0
         selected_indices = []
