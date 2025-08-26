@@ -83,7 +83,8 @@ class CausalSelfAttention(nn.Module):
         # flex attention kernel options
         self.flex_kernel_options = flex_kernel_options
 
-    def forward(self, x, v1=None, block_mask=None):
+    # (TBD). remove attn_score gadget for optimization purpose
+    def forward(self, x, v1=None, block_mask=None, return_attn: bool = False):
         B, T = x.size(0), x.size(1)  
         # Compute Q, K, V
         q = self.c_q(x).view(B, T, self.n_head, -1)
@@ -103,7 +104,32 @@ class CausalSelfAttention(nn.Module):
         )
         y = y.transpose(1, 2).contiguous().view_as(x)       
         y = self.c_proj(y)
-        return y, v1
+        if return_attn: 
+            # Transpose q and k to (B, n_head, T, head_dim) for attention computation
+            q_t = q.transpose(1, 2)
+            k_t = k.transpose(1, 2)
+            attn_scores = torch.matmul(q_t, k_t.transpose(-2, -1)) / (q_t.size(-1) ** 0.5)
+            
+            # Create a mask tensor from the BlockMask object
+            if block_mask is not None:
+                q_indices = torch.arange(T, device=x.device).unsqueeze(1).expand(T, T)
+                kv_indices = torch.arange(T, device=x.device).unsqueeze(0).expand(T, T)
+                # Apply the mask function to get boolean mask
+                # BlockMask expects (b, h, q_idx, kv_idx) but we'll use dummy b, h
+                mask_tensor = torch.zeros((T, T), dtype=torch.bool, device=x.device)
+                for i in range(T):
+                    for j in range(T):
+                        # Check if this position should be attended to
+                        mask_tensor[i, j] = block_mask.mask_mod(0, 0, i, j)
+                
+                # Expand mask for batch and heads
+                mask_expanded = mask_tensor.unsqueeze(0).unsqueeze(0).expand(B, self.n_head, -1, -1)
+                attn_scores = attn_scores.masked_fill(~mask_expanded, float('-inf'))
+            
+            attn_weights = torch.softmax(attn_scores, dim=-1)
+            return y, v1, attn_weights
+        else: 
+            return y, v1
 
 
 class MLP(nn.Module):
@@ -128,12 +154,22 @@ class Block(nn.Module):
         self.mlp = MLP(config.n_embd)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-    def forward(self, x, v1, x0, block_mask):
+   
+    # (TBD). remove attn_score gadget for optimization purpose
+    def forward(self, x, v1, x0, block_mask, return_attn=False):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x1, v1 = self.attn(norm(x), v1, block_mask)
+        if return_attn:
+            x1, v1, attn_weights = self.attn(norm(x), v1, block_mask, return_attn=True)
+        else:
+            x1, v1 = self.attn(norm(x), v1, block_mask, return_attn=False)
+            attn_weights = None
         x = x + x1
         x = x + self.mlp(norm(x))
-        return x, v1
+        
+        if return_attn:
+            return x, v1, attn_weights
+        else:
+            return x, v1
     
 
 @dataclass
@@ -294,7 +330,7 @@ class GAT(nn.Module):
 
         return batch_data
 
-    def propagate(self, batch_data: HierSeq): # Purely for debugging
+    def propagate(self, batch_data: HierSeq, return_attn: bool = False, do_slice: bool = True): # Purely for debugging
         input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
 
         def sample_causal_mask(b, h, q_idx, kv_idx):
@@ -305,17 +341,27 @@ class GAT(nn.Module):
         S = input_idx.shape[0]
         block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
 
-        x = self._create_hseq_embd(batch_data, do_slice=True)
+        x = self._create_hseq_embd(batch_data, do_slice=do_slice)
 
         x = norm(x)
         x0 = x
         v1 = None
+        
+        attn_weights_all = [] if return_attn else None
 
         for i in range(self.num_layers):
-            x, v1 = self.transformer.h[i](x, v1, x0, block_mask)
+            if return_attn:
+                x, v1, attn_weights = self.transformer.h[i](x, v1, x0, block_mask, return_attn=True)
+                attn_weights_all.append(attn_weights)
+            else:
+                x, v1 = self.transformer.h[i](x, v1, x0, block_mask, return_attn=False)
 
         x = norm(x)
-        return x
+        
+        if return_attn:
+            return x, attn_weights_all
+        else:
+            return x
 
     def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
 
@@ -425,14 +471,14 @@ class GAT(nn.Module):
     def _decode(self, logits: torch.Tensor, temperature: float = 0.0, mask_token_id: int = MASK_TOK):
 
         if temperature == 0.0:
-            if mask_token_id is not None:
-                logits[:, mask_token_id] = float('-inf')
+            # if mask_token_id is not None:
+            #     logits[:, mask_token_id] = float('-inf')
             return torch.argmax(30 * torch.tanh(logits / 30), dim=-1)
         else: 
             logits = 30 * torch.tanh(logits / 30)
             logits = logits.float()
-            if mask_token_id is not None:
-                logits[:, mask_token_id] = float('-inf')
+            # if mask_token_id is not None:
+            #     logits[:, mask_token_id] = float('-inf')
             return torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
 
 

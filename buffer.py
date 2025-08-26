@@ -106,23 +106,26 @@ def plot_buffer_state(ax, cr, ppl, ppl_thres, ppl_thres_percentile,
 
 class Buffer: 
     
-    def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=20.0, debug=False): 
+    def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=20.0, t_record = 10, debug=False): 
         self.file_path = file_path
         self.pool, self.timestamps = load_shard(file_path)  # Now load_shard returns both
         if debug: 
             self.pool = self.pool[:120]
             self.timestamps = self.timestamps[:120]
         self.max_length = max_length
-        self.cr = np.array([0. for _ in range(len(self.pool))]) # control rate per sample
-        self.ppl = np.array([float('inf') for _ in range(len(self.pool))]) # perplexity per sample
-        self.cts = np.array([0 for _ in range(len(self.pool))]) # critical timestamps per sample
+
+        self.t_record = t_record
+        self.cr = np.zeros((t_record, len(self.pool)))
+        self.ppl = np.full((t_record, len(self.pool)), float('inf'))
+        self.cts = np.zeros((t_record, len(self.pool)), dtype=int)
+
         self.ppl_thres_percentile = ppl_thres_percentile
         self.K, self.L = K, L
 
     @property
     def ppl_thres(self): 
         # Filter out infinite values when calculating percentile
-        finite_ppl = self.ppl[np.isfinite(self.ppl)]
+        finite_ppl = self.ppl[-1, np.isfinite(self.ppl[-1])]
         if len(finite_ppl) == 0:
             return float('inf')  # If no finite values, return inf
         return np.percentile(finite_ppl, self.ppl_thres_percentile)
@@ -130,15 +133,15 @@ class Buffer:
     def get_batch(self, pad: bool = True, t_search: int = 2, noise_scale: float = 0.1):
 
         # perturbate on index selection
-        cr_range = np.max(self.cr) - np.min(self.cr) + 1e-8
-        finite_ppl = self.ppl[np.isfinite(self.ppl)]
+        cr_range = np.max(self.cr[-1]) - np.min(self.cr[-1]) + 1e-8
+        finite_ppl = self.ppl[-1, np.isfinite(self.ppl[-1])]
         ppl_range = np.max(finite_ppl) - np.min(finite_ppl) + 1e-8 if len(finite_ppl) > 0 else 1.0
         cr_noise = np.random.randn(len(self.pool)) * cr_range * noise_scale
         ppl_noise = np.random.randn(len(self.pool)) * ppl_range * noise_scale
         
         sorted_indices = sorted(range(len(self.pool)), 
-                              key=lambda i: (self.cr[i] + cr_noise[i], 
-                                           self.ppl[i] + ppl_noise[i]))
+                              key=lambda i: (self.cr[-1, i] + cr_noise[i], 
+                                           self.ppl[-1, i] + ppl_noise[i]))
         
         batch = []
         curr_len = 0
@@ -155,7 +158,7 @@ class Buffer:
 
         batch_data = HierSeq.from_hierarchical_data(batch, self.K, self.L, sample_indices=selected_indices)
         if pad: 
-            cts = self.cts[selected_indices]
+            cts = self.cts[-1, selected_indices]
             pad_abstract_tokens(batch_data, cts, t_search)
 
         return batch_data
@@ -171,9 +174,41 @@ class Buffer:
             sample_hier_seq, sample_ts = batch_seqs[loc_idx], batch_ts[loc_idx]
             self.pool[global_idx] = (sample_len, sample_hier_seq)
             self.timestamps[global_idx] = sample_ts
-            self.cr[global_idx] = cr[loc_idx]
-            self.ppl[global_idx] = ppl[loc_idx]
-            self.cts[global_idx] = cts[loc_idx]
+            self._update_record(cr[loc_idx], ppl[loc_idx], cts[loc_idx])
+
+    # (TBD). 'ppl improvement with search' & 'ppl improvement w.o. search' should be computed
+    #         we'd use percentile of ppl improvement to determine whehter to do search or optimization, dynamic threshold
+    #        'with search' means cts[-1, idx] >= 0, 'without search' means cts[-1, idx] == -1
+    def _update_record(self, cr, ppl, cts): 
+        self.cr = np.roll(self.cr, -1, axis=0)
+        self.ppl = np.roll(self.ppl, -1, axis=0)
+        self.cts = np.roll(self.cts, -1, axis=0)
+        self.cr[-1, :] = cr
+        self.ppl[-1, :] = ppl
+        self.cts[-1, :] = cts
+
+    # (TBD). An issue, or rather the exact issue, is about 'stop repeativive search ON SAME POSITION' rather than stop search entirely
+    #        In a sense, the indication of 'no improvement from search' should not lead to stop search (cts=-1), rather, it should lead
+    #        to 'no backtracking', or at the very least, it should lead to 'no backtracking on the same old position', this requires 
+    #        some gadget & function to implement
+
+    @property 
+    def search_mask(self): 
+        valid_ppl = ~np.isinf(self.ppl)
+        valid_pairs = valid_ppl[1:] & valid_ppl[:-1]
+        valid_search = (self.cts[1:] != -1) & valid_pairs
+        if not valid_search.any():
+            search_mask = np.ones(self.ppl.shape[1], dtype=bool)
+            return search_mask
+
+        ppl_delta = (self.ppl[:-1][valid_pairs] - self.ppl[1:][valid_pairs]).reshape(-1, valid_pairs.shape[1])
+        ppl_delta_thres = np.percentile(ppl_delta, self.ppl_thres_percentile, axis=0)
+
+        ppl_search_delta =(self.ppl[:-1][valid_search] - self.ppl[1:][valid_search]).reshape(-1, valid_search.shape[1])
+        ppl_search_delta = np.mean(ppl_search_delta, axis=0)
+
+        search_mask = ppl_search_delta >= ppl_delta_thres
+        return search_mask
 
     def write_to_file(self): 
         write_shard(self.file_path, self.pool, self.timestamps)  # Pass timestamps too
@@ -182,9 +217,9 @@ class Buffer:
         fig, ax = plt.subplots(figsize=(10, 8))
         
         # Filter out infinite values for visualization
-        finite_mask = np.isfinite(self.ppl) & np.isfinite(self.cr)
-        cr_finite = self.cr[finite_mask]
-        ppl_finite = self.ppl[finite_mask]
+        finite_mask = np.isfinite(self.ppl[-1]) & np.isfinite(self.cr[-1])
+        cr_finite = self.cr[-1, finite_mask]
+        ppl_finite = self.ppl[-1, finite_mask]
         
         if len(cr_finite) == 0:
             print("No finite data to visualize")
@@ -297,9 +332,9 @@ class Buffer:
     
     def get_buffer_statistics(self):
         # Filter finite values for statistics
-        finite_mask = np.isfinite(self.ppl) & np.isfinite(self.cr)
-        cr_finite = self.cr[finite_mask]
-        ppl_finite = self.ppl[finite_mask]
+        finite_mask = np.isfinite(self.ppl[-1]) & np.isfinite(self.cr[-1])
+        cr_finite = self.cr[-1, finite_mask]
+        ppl_finite = self.ppl[-1, finite_mask]
         
         stats = {
             'total_samples': len(self.pool),
@@ -315,8 +350,8 @@ class Buffer:
             'ppl_max': np.max(ppl_finite) if len(ppl_finite) > 0 else float('nan'),
             'ppl_threshold': self.ppl_thres,
             'samples_below_threshold': np.sum(ppl_finite < self.ppl_thres) if len(ppl_finite) > 0 else 0,
-            'cts_mean': np.mean(self.cts),
-            'cts_max': np.max(self.cts),
+            'cts_mean': np.mean(self.cts[-1]),
+            'cts_max': np.max(self.cts[-1]),
         }
         
         # Calculate correlation between cr and ppl (only for finite values)
