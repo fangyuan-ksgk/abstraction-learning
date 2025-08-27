@@ -471,14 +471,14 @@ class GAT(nn.Module):
     def _decode(self, logits: torch.Tensor, temperature: float = 0.0, mask_token_id: int = MASK_TOK):
 
         if temperature == 0.0:
-            # if mask_token_id is not None:
-            #     logits[:, mask_token_id] = float('-inf')
+            if mask_token_id is not None:
+                logits[:, mask_token_id] = float('-inf')
             return torch.argmax(30 * torch.tanh(logits / 30), dim=-1)
         else: 
             logits = 30 * torch.tanh(logits / 30)
             logits = logits.float()
-            # if mask_token_id is not None:
-            #     logits[:, mask_token_id] = float('-inf')
+            if mask_token_id is not None:
+                logits[:, mask_token_id] = float('-inf')
             return torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
 
 

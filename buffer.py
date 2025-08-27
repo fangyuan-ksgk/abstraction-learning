@@ -180,6 +180,8 @@ class Buffer:
 
         self.regularize_cts()
 
+        self.sanity_check()
+
 
     def _update_record(self, hseq: HierSeq, cr: torch.Tensor, ppl: torch.Tensor, cts: torch.Tensor, ext_ts: torch.Tensor): 
 
@@ -209,7 +211,8 @@ class Buffer:
             return
 
         neg_ppl_mask = ( ppl_improvement <= np.percentile(ppl_improvement[valid_mask], 80) ) & valid_mask
-        neg_backtrack = neg_ppl_mask & (cts_backtrack <= 0)
+        backtrack_mask = (cts_backtrack <= 0) & (self.cts[-1] != -1) | ((self.cts[:-1] == -1) & (self.cts[-1] != -1))
+        neg_backtrack = neg_ppl_mask & backtrack_mask
         total_neg_backtrack = neg_backtrack.sum(axis=0)
 
         block_search_mask = total_neg_backtrack > patience_threshold
@@ -219,7 +222,11 @@ class Buffer:
         for i, total_neg in enumerate(total_neg_backtrack): 
             if total_neg > patience_threshold: 
                 print(f" - Sample {i} has {total_neg} negative backtracks, block backtrack and extend from {extension_ts[i]}")
-        
+
+    def sanity_check(self): 
+        assert (self.cr[self.cts == -1] == 1.0).all(), " - Critical timestamps are not -1 when control rate is 1.0"
+
+
     def write_to_file(self): 
         write_shard(self.file_path, self.pool, self.timestamps)  # Pass timestamps too
 
