@@ -393,7 +393,7 @@ class GAT(nn.Module):
             weighted_loss = self._compute_weighted_loss(batch_data, ppt)
             critical_timestamps = infer_critical_ts(ppt.detach(), batch_data, p_thres)
             cr_per_sample = compute_cond_ratio(batch_data)
-            return weighted_loss, critical_timestamps, cr_per_sample
+            return weighted_loss, critical_timestamps, cr_per_sample, ppt
 
 
     def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 

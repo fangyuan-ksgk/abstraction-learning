@@ -4,6 +4,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from utils import get_sample_level_ppl
+import numpy as np
 
 def visualize_attn(attn_weights, batch_data, idx=0):
     """
@@ -133,77 +135,115 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 
-def visualize_ppl_evolution(buffer, sample_idx=0, t_search=32, figsize=(12, 6)):
-    """
-    Visualize PPL evolution over time for a specific sample.
-    - Blue line for timesteps before critical point
-    - Red line from critical point onwards (generated at last iteration)
-    - Dotted horizontal line for PPL threshold
-    - Green dot for critical timestamp with vertical dotted line
-    """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    
-    ppl_history = buffer.ppl[:, sample_idx]
-    
-    valid_mask = ~np.isinf(ppl_history)
-    if not valid_mask.any():
-        print(f"No valid data for sample {sample_idx}")
-        return
-    
-    timesteps = np.arange(len(ppl_history))
-    valid_timesteps = timesteps[valid_mask]
-    valid_ppl = ppl_history[valid_mask]
-    
-    if len(valid_timesteps) < 2:
-        print(f"Not enough data points for sample {sample_idx}")
-        return
-    
-    critical_ts = None
-    if len(buffer.cts) >= 2 and buffer.cts[-2, sample_idx] != -1:
-        critical_ts = int(buffer.cts[-2, sample_idx])
-    
-    if critical_ts is not None and critical_ts in valid_timesteps:
 
-        critical_idx = np.where(valid_timesteps == critical_ts)[0][0]
-        ax.plot(valid_timesteps[:critical_idx+1], valid_ppl[:critical_idx+1], 
-               'b-', linewidth=2, label='Available Abstraction')
-        if critical_idx < len(valid_timesteps) - 1:
-            ax.plot(valid_timesteps[critical_idx:], valid_ppl[critical_idx:], 
-                   'r-', linewidth=2, label='Backtrack-Resampled Abstraction')
-        ax.scatter(critical_ts, ppl_history[critical_ts], 
-                  color='green', s=150, zorder=5, label=f'Critical point (t={critical_ts})')
-        ax.axvline(x=critical_ts, ymin=0, ymax=(ppl_history[critical_ts] - ax.get_ylim()[0]) / (ax.get_ylim()[1] - ax.get_ylim()[0]),
-                  color='green', linestyle=':', linewidth=1.5, alpha=0.7)
-        ax.vlines(x=critical_ts, ymin=ax.get_ylim()[0], ymax=ppl_history[critical_ts],
-                 colors='green', linestyles=':', linewidth=1.5, alpha=0.7)
-        
-    else:
-        ax.plot(valid_timesteps, valid_ppl, 'b-', linewidth=2, label='PPL')
+
+def visualize_backtrack(critical_timesteps, sample_idx, sample_timestamps, sample_ppt, ppl_thres):
+    plt.figure(figsize=(12, 6))
+    plt.plot(sample_timestamps.cpu().numpy(), sample_ppt.cpu().numpy(), 'b-', linewidth=2, label='Perplexity')
+    plt.axhline(y=ppl_thres, color='r', linestyle='--', linewidth=1.5, label=f'Threshold ({ppl_thres:.2f})')
     
-    if hasattr(buffer, 'ppl_thres') and buffer.ppl_thres is not None:
-        ax.axhline(y=buffer.ppl_thres, color='gray', linestyle='--', 
-                  linewidth=1.5, alpha=0.7, label=f'ppl_thres = {buffer.ppl_thres:.2f}')
+    # Highlight critical timestamps
+    critical_mask = sample_ppt > ppl_thres
+    if critical_mask.any():
+        critical_ts = sample_timestamps[critical_mask]
+        critical_ppt = sample_ppt[critical_mask]
+        plt.scatter(critical_ts.cpu().numpy(), critical_ppt.cpu().numpy(), 
+                   color='red', s=100, zorder=5, label='Critical Points')
     
-    ax.set_xlabel('Time Step', fontsize=12)
-    ax.set_ylabel('PPL', fontsize=12)
-    ax.set_title(f'PPL Evolution - Sample {sample_idx}', fontsize=14)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best')
+    # Mark backtrack point
+    if sample_idx < len(critical_timesteps):
+        backtrack_ts = critical_timesteps[sample_idx]
+        if backtrack_ts > 0:
+            plt.axvline(x=backtrack_ts, color='green', linestyle=':', 
+                       linewidth=2, label=f'Backtrack (t={backtrack_ts})')
     
-    ax.set_xlim(-0.5, max(valid_timesteps) + 0.5)
-    
-    y_min = min(valid_ppl) - 0.05 * (max(valid_ppl) - min(valid_ppl))
-    y_max = max(valid_ppl) + 0.05 * (max(valid_ppl) - min(valid_ppl))
-    ax.set_ylim(y_min, y_max)
-    
+    plt.xlabel('Timestamp', fontsize=12)
+    plt.ylabel('Perplexity', fontsize=12)
+    plt.title(f'Backtrack Visualization - Sample {sample_idx}', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10)
     plt.tight_layout()
     plt.show()
+
+import io
+from PIL import Image
+
+def visualize_multi_sample_backtrack(batch_data, ppt, cts, buffer, num_samples=4, figsize=(16, 12)):
+    """
+    Create a grid visualization of backtrack analysis for multiple samples.
+    Returns PIL Image without displaying.
+    """
+    from utils import get_sample_level_ppl
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    import io
+    from PIL import Image
     
-    print(f"\n=== PPL Evolution Summary for Sample {sample_idx} ===")
-    print(f"Total timesteps: {len(valid_timesteps)}")
-    print(f"Initial PPL: {valid_ppl[0]:.4f}")
-    print(f"Final PPL: {valid_ppl[-1]:.4f}")
-    print(f"PPL improvement: {valid_ppl[0] - valid_ppl[-1]:.4f}")
-    if critical_ts is not None:
-        print(f"Critical timestamp: {critical_ts}")
-        print(f"Backtrack will happen from: {critical_ts + t_search}")
+    grid_size = int(np.ceil(np.sqrt(num_samples)))
+    rows = grid_size
+    cols = grid_size if num_samples > (grid_size - 1) * grid_size else grid_size - 1
+    
+    fig, axes = plt.subplots(rows, cols, figsize=figsize)
+    fig.suptitle(f'Backtrack Visualization for {num_samples} Samples', fontsize=16)
+    
+    if num_samples == 1:
+        axes_flat = [axes]
+    elif rows == 1 or cols == 1:
+        axes_flat = axes
+    else:
+        axes_flat = axes.flatten()
+    
+    actual_samples = min(num_samples, batch_data.indices.max().item() + 1)
+    
+    for i in range(actual_samples):
+        sample_idx = i
+        per_sample_ppt, per_sample_timestamps, per_sample_max_abs_ts = get_sample_level_ppl(batch_data, ppt, level=0)
+        max_abs_ts = per_sample_max_abs_ts[sample_idx]
+        sample_timestamps = per_sample_timestamps[sample_idx][:max_abs_ts + batch_data.K]
+        sample_ppt = per_sample_ppt[sample_idx][:max_abs_ts + batch_data.K]
+        ax = axes_flat[i]
+        
+        ax.plot(sample_timestamps.cpu().numpy(), sample_ppt.cpu().numpy(), 'b-', linewidth=1.5, label='Perplexity')
+        ax.axhline(y=buffer.ppl_thres, color='r', linestyle='--', linewidth=1, label=f'Threshold ({buffer.ppl_thres:.2f})')
+        
+        if sample_idx < len(cts):
+            backtrack_ts = cts[sample_idx] + 1
+            if backtrack_ts > 0:
+                ax.axvline(x=backtrack_ts, color='green', linestyle=':', linewidth=1.5, label=f'Backtrack (t={backtrack_ts})')
+                backtrack_idx = (sample_timestamps == backtrack_ts).nonzero(as_tuple=True)[0]
+                if len(backtrack_idx) > 0:
+                    backtrack_y = sample_ppt[backtrack_idx[0]]
+                    ax.scatter(backtrack_ts, backtrack_y.cpu().numpy(), marker='^', color='green', s=80, zorder=5, label='Backtrack Points')
+
+        critical_mask = (sample_ppt > buffer.ppl_thres) & (sample_timestamps != backtrack_ts)
+        if critical_mask.any():
+            critical_ts = sample_timestamps[critical_mask]
+            critical_ppt = sample_ppt[critical_mask]
+            ax.scatter(critical_ts.cpu().numpy(), critical_ppt.cpu().numpy(), color='red', s=50, zorder=5, label='Critical Points')
+            
+        ax.set_xlabel('Timestamp', fontsize=10)
+        ax.set_ylabel('Perplexity', fontsize=10)
+        ax.set_title(f'Sample {sample_idx}', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc='upper right')
+        ax.set_ylim([2.0, 5.5])
+        ax.set_xlim([0, 100])
+    
+    for i in range(actual_samples, len(axes_flat)):
+        axes_flat[i].axis('off')
+    
+    # Use tight_layout with figure object to avoid display
+    fig.tight_layout()
+    
+    # Save to buffer and convert to PIL Image
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+    buf.seek(0)
+    pil_image = Image.open(buf)
+    
+    # Important: Close the figure to free memory and prevent display
+    plt.close(fig)
+    
+    return pil_image

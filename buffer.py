@@ -3,7 +3,7 @@
 import numpy as np 
 import struct 
 import os
-from utils import HierSeq, pad_abstract_tokens
+from utils import HierSeq, pad_abstract_tokens, get_ext_ts
 import torch 
 
 import matplotlib.pyplot as plt
@@ -104,31 +104,32 @@ def plot_buffer_state(ax, cr, ppl, ppl_thres, ppl_thres_percentile,
     
     return scatter
 
+BIG_VALUE = 9999.
+
+# (TBD). Include Patience Counter for non-progression. 
 class Buffer: 
     
     def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=20.0, t_record = 10, debug=False): 
         self.file_path = file_path
         self.pool, self.timestamps = load_shard(file_path)  # Now load_shard returns both
         if debug: 
-            self.pool = self.pool[:120]
-            self.timestamps = self.timestamps[:120]
+            self.pool = self.pool
+            self.timestamps = self.timestamps
         self.max_length = max_length
 
         self.t_record = t_record
         self.cr = np.zeros((t_record, len(self.pool)))
-        self.ppl = np.full((t_record, len(self.pool)), float('inf'))
+        self.ppl = np.full((t_record, len(self.pool)), BIG_VALUE)
         self.cts = np.zeros((t_record, len(self.pool)), dtype=int)
+        self.ext_ts = np.zeros((t_record, len(self.pool)), dtype=int)
 
         self.ppl_thres_percentile = ppl_thres_percentile
         self.K, self.L = K, L
 
+    # (TBD). Verify a better choice of ppl_thres
     @property
-    def ppl_thres(self): 
-        # Filter out infinite values when calculating percentile
-        finite_ppl = self.ppl[-1, np.isfinite(self.ppl[-1])]
-        if len(finite_ppl) == 0:
-            return float('inf')  # If no finite values, return inf
-        return np.percentile(finite_ppl, self.ppl_thres_percentile)
+    def ppl_thres(self):         
+        return np.percentile(self.ppl[self.cts != BIG_VALUE], self.ppl_thres_percentile)
 
     def get_batch(self, pad: bool = True, t_search: int = 2, noise_scale: float = 0.1):
 
@@ -163,53 +164,62 @@ class Buffer:
 
         return batch_data
 
+    # (TBD). This is logically wrong, we ends up adding 3 timestamp info here
     def update(self, hseq: HierSeq, cr: torch.Tensor, ppl: torch.Tensor, cts: torch.Tensor): 
 
-        indices = torch.unique(hseq.sample_idx, sorted=True)
-
         batch_seqs, batch_ts = hseq.to_hierarchical_data()
+        per_sample_ext_ts = get_ext_ts(hseq)
 
-        for loc_idx, global_idx in enumerate(indices): 
+        for loc_idx, global_idx in enumerate(hseq.indices): 
             sample_len = self.pool[global_idx][0]
             sample_hier_seq, sample_ts = batch_seqs[loc_idx], batch_ts[loc_idx]
             self.pool[global_idx] = (sample_len, sample_hier_seq)
             self.timestamps[global_idx] = sample_ts
-            self._update_record(cr[loc_idx], ppl[loc_idx], cts[loc_idx])
 
-    # (TBD). 'ppl improvement with search' & 'ppl improvement w.o. search' should be computed
-    #         we'd use percentile of ppl improvement to determine whehter to do search or optimization, dynamic threshold
-    #        'with search' means cts[-1, idx] >= 0, 'without search' means cts[-1, idx] == -1
-    def _update_record(self, cr, ppl, cts): 
-        self.cr = np.roll(self.cr, -1, axis=0)
-        self.ppl = np.roll(self.ppl, -1, axis=0)
-        self.cts = np.roll(self.cts, -1, axis=0)
-        self.cr[-1, :] = cr
-        self.ppl[-1, :] = ppl
-        self.cts[-1, :] = cts
+        self._update_record(hseq, cr, ppl, cts, per_sample_ext_ts)
 
-    # (TBD). An issue, or rather the exact issue, is about 'stop repeativive search ON SAME POSITION' rather than stop search entirely
-    #        In a sense, the indication of 'no improvement from search' should not lead to stop search (cts=-1), rather, it should lead
-    #        to 'no backtracking', or at the very least, it should lead to 'no backtracking on the same old position', this requires 
-    #        some gadget & function to implement
+        self.regularize_cts()
 
-    @property 
-    def search_mask(self): 
-        valid_ppl = ~np.isinf(self.ppl)
-        valid_pairs = valid_ppl[1:] & valid_ppl[:-1]
-        valid_search = (self.cts[1:] != -1) & valid_pairs
-        if not valid_search.any():
-            search_mask = np.ones(self.ppl.shape[1], dtype=bool)
-            return search_mask
 
-        ppl_delta = (self.ppl[:-1][valid_pairs] - self.ppl[1:][valid_pairs]).reshape(-1, valid_pairs.shape[1])
-        ppl_delta_thres = np.percentile(ppl_delta, self.ppl_thres_percentile, axis=0)
+    def _update_record(self, hseq: HierSeq, cr: torch.Tensor, ppl: torch.Tensor, cts: torch.Tensor, ext_ts: torch.Tensor): 
 
-        ppl_search_delta =(self.ppl[:-1][valid_search] - self.ppl[1:][valid_search]).reshape(-1, valid_search.shape[1])
-        ppl_search_delta = np.mean(ppl_search_delta, axis=0)
+        indices = hseq.indices
 
-        search_mask = ppl_search_delta >= ppl_delta_thres
-        return search_mask
+        rolled_cr = np.roll(self.cr[:, indices], -1, axis=0)[:-1]  # Remove last row after rolling
+        self.cr[:, indices] = np.vstack([rolled_cr, cr.reshape(1, -1)])  # Add new cr as last row
 
+        roller_ppl = np.roll(self.ppl[:, indices], -1, axis=0)[:-1]
+        self.ppl[:, indices] = np.vstack([roller_ppl, ppl.reshape(1, -1)])
+
+        roller_cts = np.roll(self.cts[:, indices], -1, axis=0)[:-1]
+        self.cts[:, indices] = np.vstack([roller_cts, cts.reshape(1, -1)])
+
+        roller_ext_ts = np.roll(self.ext_ts[:, indices], -1, axis=0)[:-1]
+        self.ext_ts[:, indices] = np.vstack([roller_ext_ts, ext_ts.reshape(1, -1)])
+
+
+    # (TBD). Iterate on this gadget
+    #      - Repeatitive negative backtrack without ppl improvement shall be blocked
+    def regularize_cts(self, patience_threshold: int = 1): 
+
+        valid_mask = self.ppl[:-1] < 9999
+        ppl_improvement = self.ppl[-1] - self.ppl[:-1]
+        cts_backtrack = self.cts[-1] - self.cts[:-1]
+        if valid_mask.sum() == 0: 
+            return
+
+        neg_ppl_mask = ( ppl_improvement <= np.percentile(ppl_improvement[valid_mask], 80) ) & valid_mask
+        neg_backtrack = neg_ppl_mask & (cts_backtrack <= 0)
+        total_neg_backtrack = neg_backtrack.sum(axis=0)
+
+        block_search_mask = total_neg_backtrack > patience_threshold
+        extension_ts = self.ext_ts[-1]
+        self.cts[-1][block_search_mask] = extension_ts[block_search_mask]
+
+        for i, total_neg in enumerate(total_neg_backtrack): 
+            if total_neg > patience_threshold: 
+                print(f" - Sample {i} has {total_neg} negative backtracks, block backtrack and extend from {extension_ts[i]}")
+        
     def write_to_file(self): 
         write_shard(self.file_path, self.pool, self.timestamps)  # Pass timestamps too
 
@@ -217,7 +227,7 @@ class Buffer:
         fig, ax = plt.subplots(figsize=(10, 8))
         
         # Filter out infinite values for visualization
-        finite_mask = np.isfinite(self.ppl[-1]) & np.isfinite(self.cr[-1])
+        finite_mask = self.ppl[-1] != BIG_VALUE
         cr_finite = self.cr[-1, finite_mask]
         ppl_finite = self.ppl[-1, finite_mask]
         
@@ -332,7 +342,7 @@ class Buffer:
     
     def get_buffer_statistics(self):
         # Filter finite values for statistics
-        finite_mask = np.isfinite(self.ppl[-1]) & np.isfinite(self.cr[-1])
+        finite_mask = self.ppl[-1] != BIG_VALUE
         cr_finite = self.cr[-1, finite_mask]
         ppl_finite = self.ppl[-1, finite_mask]
         

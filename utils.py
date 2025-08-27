@@ -271,6 +271,8 @@ class HierSeq:
             sample_timestamps = self.timestamps[sample_mask]
             sample_levels = self.levels[sample_mask]
 
+
+
     @property 
     def indices(self): 
         return torch.unique(self.sample_idx, sorted=True)
@@ -382,6 +384,7 @@ def init_critical_ts(batch_data: HierSeq) -> torch.Tensor:
     return critical_ts
 
 
+# (TBD). Add 'minimal backtrack timestamp' here to avoid 'backtrack all the way back to where previous attempt failed'
 def infer_critical_ts(
     perplexity_per_token: torch.Tensor, 
     batch_data: HierSeq, 
@@ -428,6 +431,7 @@ def pad_abstract_tokens(batch_data: HierSeq,
                         critical_timestamps: Optional[torch.Tensor] = None,
                         t_pad: Optional[int] = None): 
     """Explanation-based resampling helper function"""
+    # (TBD). when we pad with critical_timestamps, we need to 'backtrack' -- not just pad crit_ts - crit_ts + t_pad, but also remove all future abstract tokens
     for loc_idx, glob_idx in enumerate(batch_data.indices): 
         mask = batch_data.sample_idx == glob_idx
         sample_timestamps = batch_data.timestamps[mask]
@@ -442,6 +446,8 @@ def pad_abstract_tokens(batch_data: HierSeq,
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
             batch_data.insert_tokens(glob_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= crit_ts])
 
+    remove_abs_tokens_after_ts(batch_data, crit_ts + t_pad)
+
 
 def remove_pad_tokens(batch_data: HierSeq): 
     """In-place removal of PAD tokens"""
@@ -450,6 +456,15 @@ def remove_pad_tokens(batch_data: HierSeq):
     batch_data.levels = batch_data.levels[~pad_mask]
     batch_data.timestamps = batch_data.timestamps[~pad_mask]
     batch_data.sample_idx = batch_data.sample_idx[~pad_mask]
+
+
+def remove_abs_tokens_after_ts(batch_data: HierSeq, ts: int): 
+    """In-place removal of abstract tokens after a certain timestamp"""
+    remove_mask = (batch_data.levels > 0) & (batch_data.timestamps > ts)
+    batch_data.tokens = batch_data.tokens[~remove_mask]
+    batch_data.levels = batch_data.levels[~remove_mask]
+    batch_data.timestamps = batch_data.timestamps[~remove_mask]
+    batch_data.sample_idx = batch_data.sample_idx[~remove_mask]
 
 
 def slice_prefix_before_pad(hierseq, pad_token=MASK_TOK):
@@ -570,6 +585,35 @@ def get_batch(max_length, sequences, L, K):
     
     batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L)
     return batch_data
+
+
+def get_sample_level_ppl(batch_data: HierSeq, ppl_per_token: torch.Tensor, level: int): 
+
+    per_sample_ppl, per_sample_timestamps, per_sample_max_ts = [], [], [] 
+
+    level_mask = (batch_data.levels[1:]==level) & (batch_data.timestamps[1:] > 1)
+    for sample_idx in batch_data.indices:
+        sample_mask = batch_data.sample_idx[1:] == sample_idx
+        per_sample_timestamps.append(batch_data.timestamps[1:][level_mask & sample_mask])
+        per_sample_ppl.append(ppl_per_token[level_mask & sample_mask])
+        max_abstract_ts = batch_data.timestamps[(batch_data.levels == level + 1) & (batch_data.sample_idx == sample_idx)][-1].item()
+        per_sample_max_ts.append(max_abstract_ts)
+
+    return per_sample_ppl, per_sample_timestamps, per_sample_max_ts
+
+
+def get_ext_ts(batch_data: HierSeq): 
+    
+    ext_ts = np.array([-1 for _ in batch_data.indices])
+    level_mask = (batch_data.levels > 0)
+    for i, sample_idx in enumerate(batch_data.indices): 
+        sample_mask = batch_data.sample_idx == sample_idx
+        end_ts = batch_data.timestamps[sample_mask][-1].item()
+        end_abs_ts = batch_data.timestamps[level_mask & sample_mask][-1].item()
+        ext_ts[i] = end_abs_ts if end_abs_ts + (batch_data.K - 1) < end_ts else -1
+    return ext_ts
+
+
 
 
 # --------------------------------------------------------------------------------------------------------------------------
