@@ -109,7 +109,7 @@ BIG_VALUE = 9999.
 # (TBD). Include Patience Counter for non-progression. 
 class Buffer: 
     
-    def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=20.0, t_record = 10, debug=False): 
+    def __init__(self, file_path, max_length, K, L, ppl_thres_percentile=20.0, t_record = 10, patience_threshold=1, debug=False): 
         self.file_path = file_path
         self.pool, self.timestamps = load_shard(file_path)  # Now load_shard returns both
         if debug: 
@@ -121,15 +121,27 @@ class Buffer:
         self.cr = np.zeros((t_record, len(self.pool)))
         self.ppl = np.full((t_record, len(self.pool)), BIG_VALUE)
         self.cts = np.zeros((t_record, len(self.pool)), dtype=int)
-        self.ext_ts = np.zeros((t_record, len(self.pool)), dtype=int)
+        self.ext_ts = np.zeros((t_record, len(self.pool)), dtype=int) # maximal value for critical_timestamp, max(abs_ts)+(K-1)
 
         self.ppl_thres_percentile = ppl_thres_percentile
         self.K, self.L = K, L
+        self.patience_threshold = patience_threshold
 
     # (TBD). Verify a better choice of ppl_thres
     @property
     def ppl_thres(self):         
         return np.percentile(self.ppl[self.cts != BIG_VALUE], self.ppl_thres_percentile)
+
+    def copy(self): 
+        new_buffer = Buffer(self.file_path, self.max_length, self.K, self.L, self.ppl_thres_percentile, self.t_record, self.patience_threshold, True)
+        new_buffer.pool = self.pool.copy()
+        new_buffer.timestamps = self.timestamps.copy()
+        new_buffer.max_length = self.max_length
+        new_buffer.cr = self.cr.copy()
+        new_buffer.ppl = self.ppl.copy()
+        new_buffer.cts = self.cts.copy()
+        new_buffer.ext_ts = self.ext_ts.copy()
+        return new_buffer
 
     def get_batch(self, pad: bool = True, t_search: int = 2, noise_scale: float = 0.1):
 
@@ -178,7 +190,7 @@ class Buffer:
 
         self._update_record(hseq, cr, ppl, cts, per_sample_ext_ts)
 
-        self.regularize_cts()
+        self.regularize_cts(self.patience_threshold)
 
         self.sanity_check()
 
@@ -221,8 +233,10 @@ class Buffer:
 
         for i, total_neg in enumerate(total_neg_backtrack): 
             if total_neg > patience_threshold: 
-                print(f" - Sample {i} has {total_neg} negative backtracks, block backtrack and extend from {extension_ts[i]}")
-
+                print(f" - Sample {i} has {total_neg} negative backtracks, tentative critical timestamp: {self.cts[-1, i]} block backtrack and extend from {extension_ts[i]}")
+            else: 
+                print(f" - Sample {i} has critical timestamp: {self.cts[-1, i]}")
+ 
     def sanity_check(self): 
         assert (self.cr[self.cts == -1] == 1.0).all(), " - Critical timestamps are not -1 when control rate is 1.0"
 

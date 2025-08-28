@@ -51,6 +51,11 @@ def make_interleave_embd(state_embd, act_embd):
     interleave_embd = torch.stack(interleave_embd, dim=0)
     return interleave_embd
 
+def get_unique_ordered(tensor): 
+    diff = torch.cat([torch.tensor([True]), tensor[1:] != tensor[:-1]])
+    unique_ordered = tensor[diff]
+    return unique_ordered
+
 # --------------------------------------------------------------------------------------------------------------------------
 
 
@@ -275,7 +280,7 @@ class HierSeq:
 
     @property 
     def indices(self): 
-        return torch.unique(self.sample_idx, sorted=True)
+        return get_unique_ordered(self.sample_idx)
 
     def next_level_groups(self): 
 
@@ -441,12 +446,13 @@ def pad_abstract_tokens(batch_data: HierSeq,
         
         if crit_ts == -1: continue
         crit_ts = max(start_ts, crit_ts)
-        remove_ts[loc_idx] = crit_ts + t_pad
+        remove_ts[loc_idx] = crit_ts + t_pad - 1
         if t_pad: end_ts = min(end_ts, crit_ts + t_pad)
 
         for l in range(1, batch_data.L):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
             batch_data.insert_tokens(glob_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= crit_ts])
+            print(f" - pad level {l} tokens to sample {glob_idx} at timestamps: {abs_tok_ts[abs_tok_ts >= crit_ts].tolist()}")
 
     remove_abs_toks(batch_data, remove_ts)
 
@@ -461,7 +467,6 @@ def remove_pad_tokens(batch_data: HierSeq):
     batch_data.sample_idx = batch_data.sample_idx[~pad_mask]
 
 
-# (TBD). Wrong logic, we need sample-specific handling, using ts as information
 def remove_abs_toks(batch_data: HierSeq, remove_ts: torch.Tensor): 
     abs_mask = (batch_data.levels > 0)
     remove_mask = torch.full(batch_data.tokens.shape, False)
@@ -471,12 +476,19 @@ def remove_abs_toks(batch_data: HierSeq, remove_ts: torch.Tensor):
             continue # no backtracking
         sample_remove_mask = (abs_mask) & (batch_data.sample_idx == sample_idx) & (batch_data.timestamps > remove_ts[i])
         remove_mask = remove_mask | sample_remove_mask
+        print(f" - remove abstract tokens to sample {sample_idx} beyond timestamp: {remove_ts[i]}")
 
     batch_data.tokens = batch_data.tokens[~remove_mask]
     batch_data.levels = batch_data.levels[~remove_mask]
     batch_data.timestamps = batch_data.timestamps[~remove_mask]
     batch_data.sample_idx = batch_data.sample_idx[~remove_mask]
 
+    # sanity check (To be removed)
+    level_mask = (batch_data.levels > 0)
+    for i, sample_idx in enumerate(batch_data.indices): 
+        sample_mask = batch_data.sample_idx == sample_idx
+        if remove_ts[i] == -1: continue
+        assert batch_data.timestamps[sample_mask & level_mask][-1] <= remove_ts[i], " - Remove timestamp is not correct"
 
 def slice_prefix_before_pad(hierseq, pad_token=MASK_TOK):
 
