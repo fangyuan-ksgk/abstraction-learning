@@ -49,7 +49,7 @@ def compute_per_sample_rewards(level_ppt: torch.Tensor, level_idx: torch.Tensor)
     n_unique = len(unique_samples)
     sums = torch.zeros(n_unique).scatter_add_(0, inverse, level_ppt)
     counts = torch.bincount(inverse, minlength=n_unique).float()
-    averages = sums / counts
+    averages = - sums / counts
 
     lookup = {s.item(): avg for s, avg in zip(unique_samples, averages)}
     return lookup 
