@@ -83,6 +83,68 @@ def compute_hierarchical_rewards(ppt: torch.Tensor, repeat_batch: HierSeq) -> di
 
     return reward_lookups 
 
+def compute_grouped_advantage(values: torch.Tensor, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Grouped advantage using indices to group values tensor"""
+    
+    unique, inverse = torch.unique(indices, return_inverse=True)
+    n = len(unique)
+
+    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+    vars = torch.zeros(n).scatter_add_(0, inverse, values**2) / torch.bincount(inverse).float() - means**2
+    stds = torch.sqrt(torch.clamp(vars, min=0))
+
+    advantages = (values - means[inverse]) / (stds[inverse] + 1e-4)
+
+    return advantages
+
+def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
+    old_log_probs = []
+    for l in range(1, repeat_batch.levels.max() + 1):
+        level_ppt_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        old_level_ppt = ppt[level_ppt_mask] # per-token-log-probability of un-updated model
+        old_log_probs.append(old_level_ppt)
+    return old_log_probs
+
+
+# (Tentative) GRPO loss computation functional
+# --------------------------------------------------------------------------------------------------------------------------
+
+def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor, old_log_probs: list,
+                      epsilon: float = 0.2):
+        
+    # per-level sample_idx->reward lookup table | detach makes sense?
+    reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+
+    loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
+
+    for l in range(1, repeat_batch.L): 
+        level_ppt_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        new_level_ppt = ppt[level_ppt_mask] 
+        old_level_ppt = old_log_probs[l] # loaded from rollout data
+
+        if old_level_ppt is None: 
+            continue 
+
+        # Compute level l reward for each sample with abstraction at level l
+        level_sample_idx = repeat_batch.sample_idx[1:][level_ppt_mask]
+        sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, level_sample_idx)]
+
+        sample_level_rewards = torch.tensor([reward_lookups[l][idx.item()] for idx in sample_with_level_l])
+        orig_idx = torch.tensor([repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l])
+
+        advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
+
+        advantages = advantages[level_sample_idx] # broadcast to each abstract token at level l
+        ratio = torch.exp(new_level_ppt - old_level_ppt)
+
+        # Compute surrogate loss
+        surrogate_loss = torch.min(ratio * advantages, torch.clamp(ratio, 1-epsilon, 1+epsilon) * advantages)
+
+        loss_abs_l = - surrogate_loss.mean()
+        loss += loss_abs_l
+
+    return loss  
+
 
 
 
