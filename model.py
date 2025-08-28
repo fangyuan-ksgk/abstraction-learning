@@ -387,6 +387,7 @@ class GAT(nn.Module):
         weighted_loss = self._compute_weighted_loss(batch_data, ppt)
         return weighted_loss.mean()
 
+    # (TBD). Simplify this, make it more elegant
     def _evaluate_hseq_perplexity(self, x: torch.Tensor, batch_data: HierSeq, p_thres: float = None) -> tuple:
         with torch.no_grad():
             ppt = self._compute_ppt(x, batch_data)

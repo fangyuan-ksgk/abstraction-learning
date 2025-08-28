@@ -47,3 +47,18 @@ def check_hierseq_complete(batch_data: HierSeq):
                 print(f" - sample {sample_idx} level {level} missing abstract token at timestamps: {missing_level_ts.tolist()}")
                 no_missing = False
     assert no_missing, " - Missing abstract tokens found"
+
+
+def check_repeat_hseq(repeat_batch: HierSeq): 
+    for orig_idx in repeat_batch.idx_map.values(): 
+        for idx1 in repeat_batch.indices: 
+            if repeat_batch.idx_map[idx1.item()] != orig_idx: 
+                continue
+            for idx2 in repeat_batch.indices: 
+                if repeat_batch.idx_map[idx2.item()] != orig_idx: 
+                    continue
+                if idx1 == idx2: 
+                    continue
+                assert (repeat_batch.tokens[repeat_batch.sample_idx == idx1] == repeat_batch.tokens[repeat_batch.sample_idx == idx2]).all(), f"Tokens at {idx1} and {idx2} are different"
+                assert (repeat_batch.levels[repeat_batch.sample_idx == idx1] == repeat_batch.levels[repeat_batch.sample_idx == idx2]).all(), f"Levels at {idx1} and {idx2} are different"
+                assert (repeat_batch.timestamps[repeat_batch.sample_idx == idx1] == repeat_batch.timestamps[repeat_batch.sample_idx == idx2]).all(), f"Timestamps at {idx1} and {idx2} are different"
