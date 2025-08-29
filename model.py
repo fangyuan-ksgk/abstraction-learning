@@ -272,7 +272,7 @@ class GAT(nn.Module):
         self._compile = config._compile
         self.level_weights = config.level_weights
 
-    def forward(self, batch_data: HierSeq, evaluate: bool = False, p_thres: float = None):
+    def forward(self, batch_data: HierSeq):
 
         input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
 
@@ -295,10 +295,8 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        if evaluate: 
-            return self._evaluate_hseq_perplexity(x, batch_data, p_thres)
-        else: 
-            return self._compute_hseq_loss(x, batch_data)
+        return self._compute_ppt(x, batch_data)
+
     
     def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0):
 
@@ -382,20 +380,6 @@ class GAT(nn.Module):
 
         return x
 
-    def _compute_hseq_loss(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
-        ppt = self._compute_ppt(x, batch_data)
-        weighted_loss = self._compute_weighted_loss(batch_data, ppt)
-        return weighted_loss.mean()
-
-    # (TBD). Simplify this, make it more elegant
-    def _evaluate_hseq_perplexity(self, x: torch.Tensor, batch_data: HierSeq, p_thres: float = None) -> tuple:
-        with torch.no_grad():
-            ppt = self._compute_ppt(x, batch_data)
-            weighted_loss = self._compute_weighted_loss(batch_data, ppt)
-            critical_timestamps = infer_critical_ts(ppt.detach(), batch_data, p_thres)
-            cr_per_sample = compute_cond_ratio(batch_data)
-            return weighted_loss, critical_timestamps, cr_per_sample, ppt
-
 
     def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
 
@@ -420,24 +404,6 @@ class GAT(nn.Module):
             ppt[level_mask] = level_losses
 
         return ppt
-
-    def _compute_weighted_loss(self, batch_data: HierSeq, ppt: torch.Tensor) -> torch.Tensor:
-     
-        total_loss = torch.zeros(batch_data.batch_size, device=self.device)
-        total_weight = torch.zeros(batch_data.batch_size, device=self.device)
-        raw_loss = defaultdict(lambda: defaultdict(float))
-
-        for loc_idx, glob_idx in enumerate(batch_data.indices): 
-            sample_mask = batch_data.sample_idx[1:] == glob_idx
-            for l in range(self.L): 
-                level_mask = (batch_data.levels[1:] == l) & sample_mask & (ppt > 0)
-                raw_loss[loc_idx][l] = ppt[level_mask].mean().item() if level_mask.any() else 0.0
-                if level_mask.any():
-                    total_loss[loc_idx] += self.level_weights[l] * ppt[level_mask].mean()
-                    total_weight[loc_idx] += self.level_weights[l]
-
-        return torch.where(total_weight > 0, total_loss / total_weight, torch.zeros_like(total_loss))
-
 
     # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 
@@ -503,7 +469,6 @@ class DATConfig:
     vocab_size_list: list = field(default_factory=lambda: [64, 32]) # vocab for abstractions
     device: str = "cuda"
     _compile: bool = True
-    level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
 
 
 # Abstract Decision transformer (DAT)
@@ -540,9 +505,7 @@ class DAT(nn.Module):
         self.level_embeddings = nn.Parameter(torch.randn(config.L-1, config.n_embd))
 
         self.device = config.device
-        self._compile = config._compile
-        self.level_weights = config.level_weights
-    
+        self._compile = config._compile    
 
     def forward(self, batch_data: HierSeq, trajectories: list):
 
@@ -711,8 +674,8 @@ class DAT(nn.Module):
                         level_logits.view(-1, level_logits.size(-1)),
                         batch_data.tokens[1:][mask]
                     )
-                    total_loss += self.level_weights[l] * level_loss
-                    total_weight += self.level_weights[l]
+                    total_loss += level_loss
+                    total_weight += 1
         
         return total_loss / total_weight
  

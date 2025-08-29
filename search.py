@@ -1,7 +1,7 @@
 import torch 
 
 from model import GAT 
-from utils import remove_pad_tokens, HierSeq
+from utils import HierSeq, pad_abstract_tokens
 import numpy as np
 
 
@@ -106,6 +106,27 @@ def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
     return old_log_probs
 
 
+
+# (Tentative). Rollout generation function 
+# --------------------------------------------------------------------------------------------------------------------------
+
+def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, t_search: int, temperature: float): 
+
+    repeat_batch = repeat_hseq(batch_data, n)
+
+    pad_abstract_tokens(repeat_batch, t_search) 
+
+    # generate rollout 
+    repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
+
+    # compute log_probs
+    ppt = gat(repeat_batch)
+    old_log_probs = _compute_log_probs(ppt, repeat_batch) # per-level log probs
+
+    return repeat_batch, old_log_probs
+
+
+
 # (Tentative) GRPO loss computation functional
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -146,7 +167,14 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor, old_log_probs: l
     return loss  
 
 
+def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor): 
 
+    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 0)
+    traj_ppt = ppt[traj_mask]
+
+    ssl_loss = traj_ppt.mean()
+
+    return ssl_loss
 
 
 
