@@ -166,9 +166,18 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
             device=repeat_batch.tokens.device
         )
 
-        advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
+        sample_level_advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
 
-        advantages = advantages[level_sample_idx] # broadcast to each abstract token at level l
+        sample_to_advantage = {
+            sample_idx.item(): adv.item() 
+            for sample_idx, adv in zip(sample_with_level_l, sample_level_advantages)
+        }
+
+        advantages = torch.tensor(
+            [sample_to_advantage[idx.item()] for idx in level_sample_idx],
+            device=repeat_batch.tokens.device
+        )
+
         ratio = torch.exp(new_level_ppt - old_level_ppt)
 
         # Compute surrogate loss
