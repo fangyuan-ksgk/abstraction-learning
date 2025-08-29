@@ -98,7 +98,7 @@ def compute_grouped_advantage(values: torch.Tensor, indices: torch.Tensor) -> tu
     return advantages
 
 def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
-    old_log_probs = []
+    old_log_probs = [None]
     for l in range(1, repeat_batch.levels.max() + 1):
         level_ppt_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
         old_level_ppt = ppt[level_ppt_mask] # per-token-log-probability of un-updated model
@@ -107,31 +107,38 @@ def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
 
 
 
-# (Tentative). Rollout generation function 
+# Rollout generation function with reference model
 # --------------------------------------------------------------------------------------------------------------------------
 
-def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, t_search: int, temperature: float): 
+def generate_rollout_data(old_model: GAT, ref_model: GAT,  
+                          batch_data: HierSeq, n: int, t_search: int, 
+                          temperature: float): 
 
     repeat_batch = repeat_hseq(batch_data, n)
 
     pad_abstract_tokens(repeat_batch, t_search) 
 
     # generate rollout 
-    repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
+    repeat_batch = old_model.generate(repeat_batch, parallel=True, temperature=temperature)
 
     # compute log_probs
-    ppt = gat(repeat_batch)
+    ppt = old_model(repeat_batch)
     old_log_probs = _compute_log_probs(ppt, repeat_batch) # per-level log probs
 
-    return repeat_batch, old_log_probs
+    # compute reference log_probs
+    ref_ppt = ref_model(repeat_batch)
+    ref_log_probs = _compute_log_probs(ref_ppt, repeat_batch) # per-level log probs
+
+    return repeat_batch, old_log_probs, ref_log_probs
 
 
 
 # (Tentative) GRPO loss computation functional
 # --------------------------------------------------------------------------------------------------------------------------
 
-def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor, old_log_probs: list,
-                      epsilon: float = 0.2):
+def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
+                      old_log_probs: list, ref_log_probs: list, 
+                      epsilon: float = 0.2, beta: float = 0.1):
         
     # per-level sample_idx->reward lookup table | detach makes sense?
     reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
@@ -143,15 +150,21 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor, old_log_probs: l
         new_level_ppt = ppt[level_ppt_mask] 
         old_level_ppt = old_log_probs[l] # loaded from rollout data
 
-        if old_level_ppt is None: 
+        if len(old_level_ppt) == 0: 
             continue 
 
         # Compute level l reward for each sample with abstraction at level l
         level_sample_idx = repeat_batch.sample_idx[1:][level_ppt_mask]
         sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, level_sample_idx)]
 
-        sample_level_rewards = torch.tensor([reward_lookups[l][idx.item()] for idx in sample_with_level_l])
-        orig_idx = torch.tensor([repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l])
+        sample_level_rewards = torch.tensor(
+            [reward_lookups[l][idx.item()] for idx in sample_with_level_l],
+            device=repeat_batch.tokens.device
+        )
+        orig_idx = torch.tensor(
+            [repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l],
+            device=repeat_batch.tokens.device
+        )
 
         advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
 
@@ -161,7 +174,15 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor, old_log_probs: l
         # Compute surrogate loss
         surrogate_loss = torch.min(ratio * advantages, torch.clamp(ratio, 1-epsilon, 1+epsilon) * advantages)
 
-        loss_abs_l = - surrogate_loss.mean()
+        # Compute KL divergence between reference & new log_probs
+        log_ratio = ref_log_probs[l] - new_level_ppt
+        kl = torch.exp(log_ratio) - log_ratio - 1
+
+        # Compute per-token loss
+        per_token_loss = surrogate_loss - beta * kl
+
+        loss_abs_l = - per_token_loss.mean()
+
         loss += loss_abs_l
 
     return loss  
@@ -175,8 +196,6 @@ def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor):
     ssl_loss = traj_ppt.mean()
 
     return ssl_loss
-
-
 
 
 
