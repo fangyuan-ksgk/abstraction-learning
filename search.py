@@ -5,7 +5,30 @@ from utils import HierSeq, pad_abstract_tokens
 import numpy as np
 
 
-# Replicate HierSeq (n_copies)
+# Get Batch functional 
+# --------------------------------------------------------------------------------------------------------------------------
+
+def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
+    rand_idx = np.random.randint(0, len(sequences))
+    batch = []
+    curr_len = 0
+
+    for idx in range(rand_idx, len(sequences) + rand_idx):
+        idx = idx % len(sequences)
+        seq = sequences[idx]
+        l = lengths[idx]
+        if curr_len + l > max_length:
+            break
+        batch.append(([seq] + [[] for _ in range(1, L)], None))
+        curr_len += l
+
+    batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L)
+    return batch_data
+
+
+
+# Relevant function for SoRL training for GAT | Essentially a combination of GRPO & SSl - abstraction trained with RL, trajectory trained with SSL
+# --------------------------------------------------------------------------------------------------------------------------
 
 def repeat_hseq(batch_data: HierSeq, n_copies: int): 
 
