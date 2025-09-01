@@ -123,6 +123,13 @@ def compute_grouped_advantage(values: torch.Tensor, indices: torch.Tensor) -> tu
 
     return advantages
 
+def compute_grouped_mean(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor: 
+    """Grouped mean using indices to group values tensor"""
+    unique, inverse = torch.unique(indices, return_inverse=True)
+    n = len(unique)
+    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+    return means
+
 def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
     old_log_probs = [None]
     for l in range(1, repeat_batch.levels.max() + 1):
@@ -221,6 +228,78 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
         loss += loss_abs_l
 
     return loss  
+
+def compute_gspo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
+                      old_log_probs: list, ref_log_probs: list, 
+                      epsilon: float = 0.2, beta: float = 0.1):
+
+    reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+
+    loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
+
+    for l in range(1, repeat_batch.L): 
+
+        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        new_level_ppt = ppt[level_mask] 
+        old_level_ppt = old_log_probs[l] # loaded from rollout data
+
+        if len(old_level_ppt) == 0: 
+            continue 
+
+        # Compute level l reward for each sample with abstraction at level l
+        pt_sample_idx = repeat_batch.sample_idx[1:][level_mask]
+        sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, pt_sample_idx)]
+
+        sample_level_rewards = torch.tensor(
+            [reward_lookups[l][idx.item()] for idx in sample_with_level_l],
+            device=repeat_batch.tokens.device
+        )
+        orig_idx = torch.tensor(
+            [repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l],
+            device=repeat_batch.tokens.device
+        )
+
+        sample_level_advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
+
+        sample_to_advantage = {
+            sample_idx.item(): adv.item() 
+            for sample_idx, adv in zip(sample_with_level_l, sample_level_advantages)
+        }
+
+        advantages = torch.tensor(
+            [sample_to_advantage[idx.item()] for idx in pt_sample_idx],
+            device=repeat_batch.tokens.device
+        )
+
+        # per-sample avg. log prob ratio
+        per_sample_ratio = compute_grouped_mean(new_level_ppt - old_level_ppt, pt_sample_idx)
+        per_sample_ratio = torch.exp(per_sample_ratio)
+
+        sample_to_ratio = {
+            sample_idx.item(): ratio.item() 
+            for sample_idx, ratio in zip(sample_with_level_l, per_sample_ratio)
+        }
+
+        ratio = torch.tensor(
+            [sample_to_ratio[idx.item()] for idx in pt_sample_idx],
+            device=repeat_batch.tokens.device
+        )
+
+        # Compute surrogate loss
+        surrogate_loss = torch.min(ratio * advantages, torch.clamp(ratio, 1-epsilon, 1+epsilon) * advantages)
+
+        # Compute KL divergence between reference & new log_probs
+        log_ratio = ref_log_probs[l] - new_level_ppt
+        kl = torch.exp(log_ratio) - log_ratio - 1
+
+        # Compute per-token loss
+        per_token_loss = surrogate_loss - beta * kl
+
+        loss_abs_l = - per_token_loss.mean()
+
+        loss += loss_abs_l
+
+    return loss
 
 
 def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor): 
