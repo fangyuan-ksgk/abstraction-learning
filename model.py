@@ -247,7 +247,6 @@ class GATConfig:
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
     device: str = "cuda"
     _compile: bool = True
-    level_weights: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
 
 
 class GAT(nn.Module):
@@ -270,7 +269,6 @@ class GAT(nn.Module):
 
         self.device = config.device
         self._compile = config._compile
-        self.level_weights = config.level_weights
 
     def forward(self, batch_data: HierSeq):
 

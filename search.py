@@ -4,6 +4,9 @@ from model import GAT
 from utils import HierSeq, pad_abstract_tokens
 import numpy as np
 
+from dataclasses import dataclass
+
+
 
 # Get Batch functional 
 # --------------------------------------------------------------------------------------------------------------------------
@@ -134,12 +137,12 @@ def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
 # --------------------------------------------------------------------------------------------------------------------------
 
 def generate_rollout_data(old_model: GAT, ref_model: GAT,  
-                          batch_data: HierSeq, n: int, t_search: int, 
+                          batch_data: HierSeq, n: int, 
                           temperature: float): 
 
     repeat_batch = repeat_hseq(batch_data, n)
 
-    pad_abstract_tokens(repeat_batch, t_search) 
+    pad_abstract_tokens(repeat_batch) 
 
     # generate rollout 
     repeat_batch = old_model.generate(repeat_batch, parallel=True, temperature=temperature)
@@ -238,3 +241,33 @@ def eval_hseq(gat: GAT, batch_data: HierSeq, p_thres=4.16):
     p_per_sample, critical_ts, cr_per_sample, ppt = gat(batch_data, evaluate=True, p_thres=p_thres) # per-sample avg. perplexity (different weight for each level's avg. perplexity)
     
     return p_per_sample, critical_ts, cr_per_sample, ppt
+
+
+# Experiment Configuration 
+# --------------------------------------------------------------------------------------------------------------------------
+from model import GATConfig
+
+@dataclass
+class SORLConfig: 
+    # model configuration 
+    gat_config: GATConfig
+
+    # training config
+    n_generations: int = 4
+    temperature: float = 1.0
+    num_iterations: int = 2
+    num_steps: int = 10 
+    grpo_steps: int = 10 
+    max_length: int = 1024 
+    learning_rate: float = 1e-3
+
+    # dataset 
+    dataset_name: str = "2body_2k"
+    dataset_path: str = "dataset/nbody/2body_2k.bin"
+
+    # validation (in-domain & out-of-domain)
+    id_validate_dataset_name: str = "2body_100"
+    id_validate_dataset_path: str = "dataset/nbody/2body_100.bin"
+
+    ood_validate_dataset_name: str = "3body_100"
+    ood_validate_dataset_path: str = "dataset/nbody/3body_100.bin"
