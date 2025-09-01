@@ -20,7 +20,8 @@ class NBodyDataset:
     K: int = 2
     L: int = 3
     filepath: str = 'dataset/nbody/sequences.bin'
-    
+    n_samples: Optional[int] = None # max number of samples to build
+
     # Data storage
     sequences: List = field(default_factory=list, init=False)
     lengths: List = field(default_factory=list, init=False)
@@ -41,6 +42,10 @@ class NBodyDataset:
         tokenizer = TinyTokenizer()
         self.sequences = [tokenizer(s) for s in dataset['sequences']]
         self.lengths = [compute_hier_seq_len(seq, self.L, self.K) for seq in self.sequences]
+
+        if self.n_samples is not None:
+            self.sequences = self.sequences[:self.n_samples]
+            self.lengths = self.lengths[:self.n_samples]
         
         # Save to disk
         self._save()
@@ -121,3 +126,21 @@ class NBodyDataset:
     
     def __getitem__(self, idx):
         return self.sequences[idx], self.lengths[idx] 
+
+    def update_abstract_params(self, L: Optional[int] = None, K: Optional[int] = None): 
+        self.L = L if L is not None else self.L
+        self.K = K if K is not None else self.K
+        self.lengths = [compute_hier_seq_len(seq, self.L, self.K) for seq in self.sequences]
+
+
+# Example Dataset Creation
+# -------------------------------------------------------------
+
+# # Create and build new dataset
+# dataset = NBodyDataset(
+#     n_bodies=2,
+#     patterns=['circular'],
+#     T=10,
+#     filepath='dataset/nbody/2body_100.bin',
+#     n_samples=100
+# ).build()

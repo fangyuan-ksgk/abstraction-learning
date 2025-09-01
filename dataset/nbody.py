@@ -383,6 +383,20 @@ def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: b
         sequences.append("\n".join(lines))
     return sequences
 
+def retrieve_nbody_data(sequences: List[str]): 
+    times, positions = [], [] 
+    for seq in sequences: 
+        lines = seq.split("\n")
+        masses = [float(m) for m in lines[0].split("|")[1:]]
+
+        t = [float(t.split("|")[0]) for t in lines[1:]]
+        pos = [tuple(map(float, p.split("|")[1:])) for p in lines[1:]]
+
+        times.append(t)
+        positions.append(pos)
+
+    return times, positions, masses
+
 
 def simulate_and_extract_data(sim, t_max=100, n_points=1001, stride=1):
     times = np.linspace(0, t_max, n_points // stride)

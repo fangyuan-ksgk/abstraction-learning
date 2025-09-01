@@ -332,6 +332,7 @@ class SORLConfig:
     gat_config: GATConfig
 
     # training config
+    gspo: bool = False # if False, use GRPO
     n_generations: int = 4
     temperature: float = 1.0
     num_iterations: int = 2
@@ -339,6 +340,8 @@ class SORLConfig:
     grpo_steps: int = 10 
     max_length: int = 1024 
     learning_rate: float = 1e-3
+    epsilon: float = 0.2
+    beta: float = 0.1
 
     # dataset 
     dataset_name: str = "2body_2k"
