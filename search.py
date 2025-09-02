@@ -171,10 +171,14 @@ def generate_rollout_data(old_model: GAT, ref_model: GAT,
 
 def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
                       old_log_probs: list, ref_log_probs: list, 
-                      epsilon: float = 0.2, beta: float = 0.1):
+                      epsilon: float = 0.2, beta: float = 0.1,
+                      detach_reward: bool = True):
         
     # per-level sample_idx->reward lookup table | detach makes sense?
-    reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+    if detach_reward:
+        reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+    else:
+        reward_lookups = compute_hierarchical_rewards(ppt, repeat_batch)
 
     loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
 
@@ -190,26 +194,17 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
         level_sample_idx = repeat_batch.sample_idx[1:][level_ppt_mask]
         sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, level_sample_idx)]
 
-        sample_level_rewards = torch.tensor(
-            [reward_lookups[l][idx.item()] for idx in sample_with_level_l],
-            device=repeat_batch.tokens.device
-        )
-        orig_idx = torch.tensor(
-            [repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l],
-            device=repeat_batch.tokens.device
-        )
+        sample_level_rewards = torch.stack([reward_lookups[l][idx.item()] for idx in sample_with_level_l])
+        orig_idx = torch.stack([repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l])
 
         sample_level_advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
 
         sample_to_advantage = {
-            sample_idx.item(): adv.item() 
+            sample_idx.item(): adv
             for sample_idx, adv in zip(sample_with_level_l, sample_level_advantages)
         }
 
-        advantages = torch.tensor(
-            [sample_to_advantage[idx.item()] for idx in level_sample_idx],
-            device=repeat_batch.tokens.device
-        )
+        advantages = torch.stack([sample_to_advantage[idx.item()] for idx in level_sample_idx])
 
         ratio = torch.exp(new_level_ppt - old_level_ppt)
 
@@ -229,11 +224,17 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
 
     return loss  
 
+
+# (Issue). We got near-zero GSPO loss
 def compute_gspo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
                       old_log_probs: list, ref_log_probs: list, 
-                      epsilon: float = 0.2, beta: float = 0.1):
+                      epsilon: float = 0.2, beta: float = 0.1, 
+                      detach_reward: bool = True):
 
-    reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+    if detach_reward:
+        reward_lookups = compute_hierarchical_rewards(ppt.detach(), repeat_batch)
+    else:
+        reward_lookups = compute_hierarchical_rewards(ppt, repeat_batch)
 
     loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
 
@@ -248,28 +249,21 @@ def compute_gspo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
 
         # Compute level l reward for each sample with abstraction at level l
         pt_sample_idx = repeat_batch.sample_idx[1:][level_mask]
-        sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, pt_sample_idx)]
+        
+        level_sample_idx = repeat_batch.sample_idx[1:][level_mask]
+        sample_with_level_l = repeat_batch.indices[torch.isin(repeat_batch.indices, level_sample_idx)]
 
-        sample_level_rewards = torch.tensor(
-            [reward_lookups[l][idx.item()] for idx in sample_with_level_l],
-            device=repeat_batch.tokens.device
-        )
-        orig_idx = torch.tensor(
-            [repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l],
-            device=repeat_batch.tokens.device
-        )
+        sample_level_rewards = torch.stack([reward_lookups[l][idx.item()] for idx in sample_with_level_l])
+        orig_idx = torch.stack([repeat_batch.idx_map[idx.item()] for idx in sample_with_level_l])
 
         sample_level_advantages = compute_grouped_advantage(sample_level_rewards, orig_idx)
 
         sample_to_advantage = {
-            sample_idx.item(): adv.item() 
+            sample_idx.item(): adv
             for sample_idx, adv in zip(sample_with_level_l, sample_level_advantages)
         }
 
-        advantages = torch.tensor(
-            [sample_to_advantage[idx.item()] for idx in pt_sample_idx],
-            device=repeat_batch.tokens.device
-        )
+        advantages = torch.stack([sample_to_advantage[idx.item()] for idx in level_sample_idx])
 
         # per-sample avg. log prob ratio
         per_sample_ratio = compute_grouped_mean(new_level_ppt - old_level_ppt, pt_sample_idx)
@@ -337,7 +331,7 @@ class SORLConfig:
     temperature: float = 1.0
     num_iterations: int = 2
     num_steps: int = 10 
-    grpo_steps: int = 10 
+    joint_steps: int = 10 
     max_length: int = 1024 
     learning_rate: float = 1e-3
     epsilon: float = 0.2

@@ -56,6 +56,7 @@ def get_unique_ordered(tensor):
     unique_ordered = tensor[diff]
     return unique_ordered
 
+
 # --------------------------------------------------------------------------------------------------------------------------
 
 
@@ -368,6 +369,7 @@ class HierSeq:
 
 # Caveat: we don't add abstract token at last timestamp, it only explains non-existing future trajectories
 
+
 def init_critical_ts(batch_data: HierSeq) -> torch.Tensor:
 
     critical_ts = torch.full((batch_data.batch_size,), -1.0, device=batch_data.tokens.device, dtype=torch.int)
@@ -424,8 +426,8 @@ def compute_cond_ratio(batch_data: HierSeq):
 
     return torch.tensor(cond_ratios)
 
-def compute_sample_len(seq: list, L: int, K: int) -> int:
-    """Compute sample length without creating HierSeq object."""
+def compute_hier_seq_len(seq: list, L: int, K: int) -> int:
+    """Full length with abstraction computation based on trajectory sequence alone"""
     seq_len = len(seq)
     total = seq_len
     for l in range(1, L):
@@ -433,8 +435,22 @@ def compute_sample_len(seq: list, L: int, K: int) -> int:
     return total + 1
 
 
+# (TBD). Importantly, t_search is not utilized here yet, this means search is not 'progressively done'
+#        rather, it's done in one go. 
+def pad_abstract_tokens(batch_data: HierSeq): 
+    abstract_mask = (batch_data.levels > 0)
+    assert not abstract_mask.any(), " - Abstract tokens already exist, 'pad_abstract_tokens' requires no abstract tokens"
 
+    for sample_idx in batch_data.indices: 
+        sample_mask = batch_data.sample_idx == sample_idx
+        sample_timestamps = batch_data.timestamps[sample_mask]
+        start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
 
+        for l in range(1, batch_data.L): 
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+            batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= start_ts])
+
+    return batch_data
 
 def remove_pad_tokens(batch_data: HierSeq): 
     """In-place removal of PAD tokens"""
@@ -567,25 +583,6 @@ def load_tokenized_binary(path):
     
     return sequences
 
-
-# (TBD). This function assumes 'sequences' misses abstract tokens
-#        During training, we need get_batch from buffer which has
-#        abstract tokens
-def get_batch(max_length, sequences, L, K):
-    rand_idx = np.random.randint(0, len(sequences))
-    batch = []
-    curr_len = 0
-    
-    for offset in range(len(sequences)):
-        idx = (rand_idx + offset) % len(sequences) 
-        sample_len, seq = sequences[idx]
-        if curr_len + sample_len > max_length:
-            break
-        batch.append(([seq] + [[] for _ in range(1, L)], None))
-        curr_len += sample_len
-    
-    batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L)
-    return batch_data
 
 
 def get_sample_level_ppl(batch_data: HierSeq, ppl_per_token: torch.Tensor, level: int): 
