@@ -235,13 +235,10 @@ class GPT(nn.Module):
 
 @dataclass
 class GATConfig:
-    vocab_size : int = 50304
     n_layer : int = 12
     n_head : int = 6
     n_embd : int = 768
     flex_kernel_options: Optional[dict] = None
-    eoc_idx : int = 5826319 
-    eos_idx : int = 5826320
     K: int = 4  # abstraction ratio
     L: int = 4  # total # of levels (including 0-th level)
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
@@ -326,7 +323,8 @@ class GAT(nn.Module):
 
         return batch_data
 
-    def propagate(self, batch_data: HierSeq, return_attn: bool = False, do_slice: bool = True): # Purely for debugging
+    def propagate(self, batch_data: HierSeq, return_attn: bool = False, do_slice: bool = True):
+        """Debugging Purpose, can return attention scores"""
         input_idx, sample_idx = batch_data.tokens[:-1], batch_data.sample_idx[:-1]
 
         def sample_causal_mask(b, h, q_idx, kv_idx):
@@ -358,6 +356,12 @@ class GAT(nn.Module):
             return x, attn_weights_all
         else:
             return x
+
+    def save_checkpoint(self, path: Union[str, Path]):
+        torch.save(self.state_dict(), path)
+
+    def load_checkpoint(self, path: Union[str, Path], strict: bool = True):
+        self.load_state_dict(torch.load(path, map_location=self.device), strict=strict)
 
     def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
 
@@ -402,6 +406,26 @@ class GAT(nn.Module):
             ppt[level_mask] = level_losses
 
         return ppt
+
+    def _compute_entropy(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor:
+
+        target_idx, target_levels = batch_data.tokens[1:], batch_data.levels[1:]
+        loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
+
+        entropy = torch.zeros_like(target_idx, device=self.device, dtype=torch.float32)
+
+        for l in range(self.L):
+            level_mask = (target_levels == l) & loss_mask
+            if not level_mask.any():
+                continue
+
+            level_logits = self.lm_heads[l](x[:, level_mask])
+            level_logits = 30 * torch.tanh(level_logits / 30).float()
+            level_entropy = torch.distributions.Categorical(logits=level_logits).entropy()
+            entropy[level_mask] = level_entropy
+
+        return entropy
+
 
     # Caveat: DAT doesn't have lm_head on level 0, therefore index for lm_head is shrunk by one, lm_head[l-1] is the lm_head for level l 
     #       - GAT, however, has lm_head on every level, therefore the index for level l lm_head is lm_head[l], I copy the code from DAT 

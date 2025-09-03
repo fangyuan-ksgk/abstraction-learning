@@ -450,7 +450,20 @@ def pad_abstract_tokens(batch_data: HierSeq):
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
             batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= start_ts])
 
-    return batch_data
+def extend_abstract_tokens(batch_data: HierSeq, t_extend: int): 
+    """In-place extension of abstract tokens"""
+    abstract_mask = (batch_data.levels > 0)
+    assert not abstract_mask.any(), " - Abstract tokens already exist, 'extend_abstract_tokens' requires no abstract tokens"
+
+    for sample_idx in batch_data.indices: 
+        sample_mask = batch_data.sample_idx == sample_idx
+        sample_timestamps = batch_data.timestamps[sample_mask]
+        start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
+
+        for l in range(1, batch_data.L): 
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+            abs_tok_ts = abs_tok_ts[(abs_tok_ts <= start_ts + t_extend) & (abs_tok_ts >= start_ts)]
+            batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
 
 def remove_pad_tokens(batch_data: HierSeq): 
     """In-place removal of PAD tokens"""

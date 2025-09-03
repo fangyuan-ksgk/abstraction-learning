@@ -35,7 +35,7 @@ dataset.update_abstract_params(L=gat_config.L, K=gat_config.K)
 # wandb init 
 wandb.init(
     project="abstraction-learning", 
-    name=f"GAT-nbody-base",
+    name=f"SSL-Transformer-nbody",
     config=ssl_config
 )
 
@@ -63,6 +63,9 @@ for iteration in range(ssl_config["num_iterations"]):
 
     wandb.log({"train/ssl_loss": ssl_loss.item()}, step=iteration)
 
+ckpt_path=f"experiment/nbody/{wandb.run.name}.pt"
+wandb.run.config["ckpt_path"] = ckpt_path
+gat.save_checkpoint(ckpt_path)
 
 
 

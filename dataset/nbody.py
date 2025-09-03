@@ -4,6 +4,7 @@ from matplotlib.lines import Line2D
 from typing import Optional, Tuple, List
 from matplotlib.animation import FuncAnimation, PillowWriter
 import matplotlib.pyplot as plt
+import re
 
 # Visualizer function for n-body system
 # --------------------------------------------------------------------------------------------------------------------------
@@ -446,17 +447,23 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, in
             'config': {'n_bodies': n_bodies, 'n_context': n_context, 
                       'include_masses': include_masses, 'patterns': patterns}}
 
+# from constant import MASK_TOK
+MASK_TOK = '<mask>'
 
 class TinyTokenizer: 
     def __init__(self):
         chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 
-                 '.', '|', 'M', '\n', '-', ',']
+                 '.', '|', 'M', '\n', '-', ',', MASK_TOK]
         self.vocab = {char: i for i, char in enumerate(chars)}
         self.inverse_vocab = {i: char for char, i in self.vocab.items()}
         self.vocab_size = len(self.vocab)
 
+        pat = sorted(self.vocab.keys(), key=len, reverse=True)
+        self.pattern = re.compile('|'.join(re.escape(p) for p in pat))
+
     def encode(self, seq: str):
-        return [self.vocab[c] for c in seq if c in self.vocab]
+        tokens = self.pattern.findall(seq)
+        return [self.vocab[t] for t in tokens]
     
     def decode(self, tokens: list):
         return ''.join([self.inverse_vocab[t] for t in tokens if t in self.inverse_vocab])
