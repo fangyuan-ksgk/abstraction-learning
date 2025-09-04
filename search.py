@@ -1,7 +1,7 @@
 import torch 
 
 from model import GAT 
-from utils import HierSeq, pad_abstract_tokens, extend_abstract_tokens
+from utils import HierSeq, pad_abstract_tokens, extend_abstract_tokens, get_unique_ordered
 import numpy as np
 
 from dataclasses import dataclass
@@ -15,6 +15,7 @@ from typing import Optional
 def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
     rand_idx = np.random.randint(0, len(sequences))
     batch = []
+    sample_indices = []
     curr_len = 0
 
     for idx in range(rand_idx, len(sequences) + rand_idx):
@@ -24,9 +25,10 @@ def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
         if curr_len + l > max_length:
             break
         batch.append(([seq] + [[] for _ in range(1, L)], None))
+        sample_indices.append(idx)
         curr_len += l
 
-    batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L)
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
     return batch_data
 
 
@@ -123,6 +125,35 @@ def repeat_hseq(batch_data: HierSeq, n_copies: int):
     return replicated_batch_data
 
 
+def select_hseq(repeat_batch: HierSeq, select_mask: torch.Tensor): 
+    batch_size = repeat_batch.batch_size
+
+    selected_tokens = repeat_batch.tokens[select_mask]
+    selected_levels = repeat_batch.levels[select_mask]
+    selected_timestamps = repeat_batch.timestamps[select_mask]
+
+    selected_sample_idx = repeat_batch.idx_map[repeat_batch.sample_idx[select_mask]]
+
+    indices = get_unique_ordered(selected_sample_idx)
+    assert batch_size % len(indices) == 0, f"Batch Size {batch_size} must be divisible by the number of selected samples {len(indices)}"
+
+    selected_batch_size = len(indices)
+
+    selected_batch_data = HierSeq(
+        tokens=selected_tokens,
+        levels=selected_levels,
+        timestamps=selected_timestamps,
+        sample_idx=selected_sample_idx,
+        batch_size=selected_batch_size,
+        K=repeat_batch.K,
+        L=repeat_batch.L
+    )
+    return selected_batch_data
+
+
+
+
+
 # Surrogate loss computation utils 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -143,7 +174,7 @@ def compute_hierarchical_rewards(ppt: torch.Tensor, repeat_batch: HierSeq) -> di
     """ 
     abstraction level l is rewarded when it improves the perplexity of level l-1 tokens
     """
-    traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 0)
+    traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
     traj_ppt = ppt[traj_mask]
     traj_idx = repeat_batch.sample_idx[1:][traj_mask]
 
@@ -161,7 +192,7 @@ def compute_hierarchical_rewards(ppt: torch.Tensor, repeat_batch: HierSeq) -> di
         
         # Prepare for next level (if exists)
         if level < repeat_batch.L - 1:
-            next_mask = (repeat_batch.levels[1:] == level) & (repeat_batch.timestamps[1:] > 0)
+            next_mask = (repeat_batch.levels[1:] == level) & (repeat_batch.timestamps[1:] > 1)
             current_level_ppt = ppt[next_mask]
             current_level_idx = repeat_batch.sample_idx[1:][next_mask]
 
@@ -189,13 +220,54 @@ def compute_grouped_mean(values: torch.Tensor, indices: torch.Tensor) -> torch.T
     means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
     return means
 
-def _compute_log_probs(ppt: torch.Tensor, repeat_batch: HierSeq) -> list:
-    old_log_probs = [None]
-    for l in range(1, repeat_batch.levels.max() + 1):
-        level_ppt_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
-        old_level_ppt = ppt[level_ppt_mask] # per-token-log-probability of un-updated model
-        old_log_probs.append(old_level_ppt)
-    return old_log_probs
+def compute_grouped_max(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor: 
+    """Grouped max using indices to group values tensor"""
+    unique, inverse = torch.unique(indices, return_inverse=True)
+    n = len(unique)
+    maxs = torch.zeros(n).scatter_add_(0, inverse, values)
+    return maxs
+
+
+def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+
+    unique_groups, inverse = torch.unique(indices, return_inverse=True)
+    num_groups = len(unique_groups)
+    device = values.device
+
+    max_values = torch.full((num_groups,), -float('inf'), device=device)
+    max_values.scatter_reduce_(0, inverse, values, reduce='amax', include_self=True)
+
+    is_max = (values == max_values[inverse])
+
+    candidate_indices = torch.where(
+        is_max, 
+        torch.arange(len(values), device=device), 
+        len(values) + 1
+    )
+    
+    min_indices = torch.full((num_groups,), len(values) + 1, device=device, dtype=torch.long)
+    min_indices.scatter_reduce_(0, inverse, candidate_indices, reduce='amin', include_self=True)
+
+    final_mask = torch.zeros_like(values, dtype=torch.bool)
+    valid_indices = min_indices[min_indices <= len(values)]
+    final_mask[valid_indices] = True
+    
+    return final_mask
+
+def compute_grouped_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map: torch.Tensor): 
+
+    # per-current-group mean (current indices)
+    unique_indices, inverse = torch.unique(indices, return_inverse=True)
+    n = len(unique_indices)
+    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+
+    # per-original-group argmax 
+    orig_idx = idx_map[unique_indices]
+    max_mask = compute_grouped_max_mask(means, orig_idx)
+    argmax_indices = unique_indices[max_mask]
+
+    # returned indices are in current indices space
+    return argmax_indices
 
 
 # Per-abstract-token reward & advantage computation 
@@ -214,7 +286,7 @@ def compute_abstract_token_rewards(repeat_batch: HierSeq, ppt: torch.Tensor) -> 
             abs_ts = repeat_batch.timestamps[1:][sample_abs_mask]
 
             abs_affect_mask = (repeat_batch.timestamps[1:] > abs_ts[0]) & (repeat_batch.timestamps[1:] <= abs_ts[-1] + repeat_batch.K**level)
-            traj_mask = (repeat_batch.levels[1:] == level - 1) & (repeat_batch.timestamps[1:] > 0) & (repeat_batch.sample_idx[1:] == sample_idx)
+            traj_mask = (repeat_batch.levels[1:] == level - 1) & (repeat_batch.timestamps[1:] > 1) & (repeat_batch.sample_idx[1:] == sample_idx)
             traj_abs_mask = (traj_mask) & (abs_affect_mask)
 
             traj_abs_ppt = ppt[traj_abs_mask]
@@ -253,7 +325,6 @@ def compute_token_advantage(rewards, orig_indices, timestamps):
 # Rollout generation function with reference model
 # --------------------------------------------------------------------------------------------------------------------------
 
-
 def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None): 
  
     repeat_batch = repeat_hseq(batch_data, n)
@@ -266,13 +337,47 @@ def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: fl
     # generate rollout 
     repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
 
-    # compute log_probs
+    return repeat_batch
+
+
+# Pick best abstraction from rollout data & Repeat it to original length
+# --------------------------------------------------------------------------------------------------------------------------
+
+def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor) -> HierSeq: 
+    """Pick best abstraction for each sample & repeat to original length"""
+
+    traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
+    traj_idx = repeat_batch.sample_idx[1:][traj_mask]
+    traj_ppl = ppt[traj_mask]
+
+    argmax_indices = compute_grouped_argmax(traj_ppl, traj_idx, repeat_batch.idx_map)
+
+    select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
+    select_batch = select_hseq(repeat_batch, select_mask)
+    select_batch = repeat_hseq(select_batch, repeat_batch.batch_size // select_batch.batch_size)
+
+    return select_batch
+
+
+# 2-in-1 search function: generate rollout & select best abstraction & repeat to original length
+# --------------------------------------------------------------------------------------------------------------------------
+
+def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None): 
+    """Explore, Evaluate, Select"""
+
+    if t_search is not None and t_search == 0: 
+        return repeat_hseq(batch_data, n)
+
+    # explore
+    repeat_batch = generate_rollout_data(gat, batch_data, n, temperature, t_search)
+
+    # evaluate 
     ppt = gat(repeat_batch)
 
-    # (TBD). Pick the best abstract token for each sample, and stitch them together
+    # select
+    select_batch = select_best_abstraction(repeat_batch, ppt)
 
-    return repeat_batch, ppt
-
+    return select_batch
 
 
 # (Tentative) GRPO loss computation functional
@@ -293,7 +398,7 @@ def compute_grpo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
     loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
 
     for l in range(1, repeat_batch.L): 
-        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 1)
         new_level_ppt = ppt[level_mask] 
         old_level_ppt = old_log_probs[l] # loaded from rollout data
 
@@ -359,7 +464,7 @@ def compute_gspo_loss(repeat_batch: HierSeq, ppt: torch.Tensor,
 
     for l in range(1, repeat_batch.L): 
 
-        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 1)
         new_level_ppt = ppt[level_mask] 
         old_level_ppt = old_log_probs[l] # loaded from rollout data
 
@@ -423,7 +528,7 @@ def compute_search_loss(repeat_batch: HierSeq, ppt: torch.Tensor):
     loss = torch.tensor(0.0, device=repeat_batch.tokens.device)
 
     for l in range(1, repeat_batch.L): 
-        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 0)
+        level_mask = (repeat_batch.levels[1:] == l) & (repeat_batch.timestamps[1:] > 1)
         new_level_ppt = ppt[level_mask] 
 
         pt_sample_idx = repeat_batch.sample_idx[1:][level_mask]
@@ -446,7 +551,7 @@ def compute_search_loss(repeat_batch: HierSeq, ppt: torch.Tensor):
 
 def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor): 
 
-    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 0)
+    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
     traj_ppt = ppt[traj_mask]
 
     ssl_loss = traj_ppt.mean()
@@ -457,7 +562,7 @@ def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor):
 def compute_dynamic_loss(repeat_batch: HierSeq, ppt: torch.Tensor): 
     """Dynamic language modeling loss Wu et al. 2025 (https://arxiv.org/abs/2508.05629)"""
 
-    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 0)
+    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
     traj_ppt = ppt[traj_mask]
 
     # Dynamic language modeling loss
@@ -467,10 +572,14 @@ def compute_dynamic_loss(repeat_batch: HierSeq, ppt: torch.Tensor):
 
 def compute_abs_ssl_loss(repeat_batch, ppt, level):
 
-    ab_mask =(repeat_batch.levels[1:] == level) & (repeat_batch.timestamps[1:] > 0)
+    ab_mask =(repeat_batch.levels[1:] == level) & (repeat_batch.timestamps[1:] > 1)
     ab_ppt = ppt[ab_mask]
-    ssl_loss = ab_ppt.mean()
     
+    if len(ab_ppt) == 0: 
+        return torch.tensor(0.0, device=repeat_batch.tokens.device)
+
+    ssl_loss = ab_ppt.mean()
+
     return ssl_loss
 
 
@@ -565,19 +674,63 @@ def eval_entropy_ppl_deviation(gat: GAT, repeat_batch: HierSeq):
 
 # Evaluation Gadget
 # --------------------------------------------------------------------------------------------------------------------------
-def eval_hseq(gat: GAT, batch_data: HierSeq, p_thres=4.16): 
-    # remove_pad_tokens(batch_data)
-    p_per_sample, critical_ts, cr_per_sample, ppt = gat(batch_data, evaluate=True, p_thres=p_thres) # per-sample avg. perplexity (different weight for each level's avg. perplexity)
-    
-    return p_per_sample, critical_ts, cr_per_sample, ppt
+def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: int, temperature: float = 0.0): 
+
+    repeat_batch = repeat_hseq(batch_data, 1)
+
+    if t_search is not None: 
+        extend_abstract_tokens(repeat_batch, t_search) 
+    else: 
+        pad_abstract_tokens(repeat_batch) 
+
+    gat.generate(repeat_batch, parallel=True, temperature=temperature)
+
+    info_str = ""
+    for idx in repeat_batch.indices: 
+        for l in range(1, repeat_batch.L): 
+            abs_mask = (repeat_batch.levels == l) & (repeat_batch.sample_idx == idx)
+            info_str += f"Sample {idx} Abstract Tokens at level {l}: {repeat_batch.tokens[abs_mask].tolist()}\n"
+
+    return info_str
 
 
 # Experiment Configuration 
 # --------------------------------------------------------------------------------------------------------------------------
 from model import GATConfig
 
+
+# Ver.3 SoRL (with GRPO / RL loss)
 @dataclass
 class SORLConfig: 
+    # model configuration 
+    gat_config: GATConfig
+
+    # training config
+    n_generations: int = 2
+    temperature: float = 1.0
+    num_iterations: int = 10
+    joint_steps: int = 20
+    max_length: int = 2048 
+    learning_rate: float = 1e-3
+    t_search: Optional[int] = None
+
+    # dataset 
+    dataset_name: str = "2body_2k"
+    dataset_path: str = "dataset/nbody/2body_2k.bin"
+
+    # validation (in-domain & out-of-domain)
+    id_validate_dataset_name: str = "2body_100"
+    id_validate_dataset_path: str = "dataset/nbody/2body_100.bin"
+
+    ood_validate_dataset_name: str = "3body_100"
+    ood_validate_dataset_path: str = "dataset/nbody/3body_100.bin"
+
+
+
+
+# Ver.2 SoRL (with GRPO / RL loss)
+@dataclass
+class SORLv2Config: 
     # model configuration 
     gat_config: GATConfig
 
@@ -605,3 +758,5 @@ class SORLConfig:
 
     ood_validate_dataset_name: str = "3body_100"
     ood_validate_dataset_path: str = "dataset/nbody/3body_100.bin"
+
+

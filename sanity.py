@@ -1,5 +1,7 @@
 from model import HierSeq
 import torch
+from model import GAT
+from search import compute_grouped_mean
 
 
 def sanity_check_same_abs_toks(batch_data: HierSeq): 
@@ -62,3 +64,24 @@ def check_repeat_hseq(repeat_batch: HierSeq):
                 assert (repeat_batch.tokens[repeat_batch.sample_idx == idx1] == repeat_batch.tokens[repeat_batch.sample_idx == idx2]).all(), f"Tokens at {idx1} and {idx2} are different"
                 assert (repeat_batch.levels[repeat_batch.sample_idx == idx1] == repeat_batch.levels[repeat_batch.sample_idx == idx2]).all(), f"Levels at {idx1} and {idx2} are different"
                 assert (repeat_batch.timestamps[repeat_batch.sample_idx == idx1] == repeat_batch.timestamps[repeat_batch.sample_idx == idx2]).all(), f"Timestamps at {idx1} and {idx2} are different"
+
+
+def sanity_check_repeat_hseq(rep_hseq: HierSeq, gat: GAT): 
+        
+    with torch.no_grad(): 
+        ppt_rep = gat(rep_hseq)
+
+    mask = (rep_hseq.timestamps[1:] > 1)
+
+    valid_ppt = ppt_rep[mask]
+    valid_idx = rep_hseq.sample_idx[1:][mask]
+    ppl_per_sample = compute_grouped_mean(valid_ppt, valid_idx)
+
+    n_unique = torch.unique(rep_hseq.idx_map).size(0)
+    n_repeat = len(ppl_per_sample) // n_unique
+
+    assert torch.allclose(ppl_per_sample[:n_unique].repeat(n_repeat), ppl_per_sample, rtol=1e-5, atol=1e-6), "Repeated HierSeq has different ppl per sample"
+
+    print("Sanity check passed for repeated HierSeq: all repeated samples have same avg. ppl")
+
+
