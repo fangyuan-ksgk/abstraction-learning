@@ -371,17 +371,21 @@ def create_random_orbital(n=3, seed=42, a_range=(0.5, 5.0), e_range=(0, 0.3), ma
 # N-body data pre-processing
 # --------------------------------------------------------------------------------------------------------------------------
 
-def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: bool = True, round_to: int = 2) -> List[str]:
+def prep_pretrain_minimal(raw_data: Tuple, n_context: int = 5, include_masses: bool = True, round_to: int = 2, answer_token: str = '') -> List[str]:
+    """Formatting function, optionally include answer token"""
+
     times, positions, _ = raw_data
     n_bodies = positions.shape[1]
     masses = np.ones(n_bodies)  # Default equal masses
     
     sequences = []
-    for i in range(len(times) - n_context + 1):
+    for i in range(len(times) - n_context):
         lines = [f"M|{'|'.join([f'{m:.2f}' for m in masses])}"] if include_masses else []
         lines += [f"{times[j]:.2f}|{'|'.join([f'{p[0]:.{round_to}f},{p[1]:.{round_to}f},{p[2]:.{round_to}f}' for p in positions[j]])}" 
-                  for j in range(i, i + n_context)]
+                for j in range(i, i + n_context)]
+        lines += [f"{times[i+n_context]:.2f}|{answer_token}{'|'.join([f'{p[0]:.{round_to}f},{p[1]:.{round_to}f},{p[2]:.{round_to}f}' for p in positions[i+n_context]])}"]
         sequences.append("\n".join(lines))
+        
     return sequences
 
 def retrieve_nbody_data(sequences: List[str]): 
@@ -421,7 +425,7 @@ def simulate_and_extract_data(sim, t_max=100, n_points=1001, stride=1):
 
 
 def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, include_masses=True, stride=1,
-                               round_to=2):
+                               round_to=2, answer_token=''):
     
     patterns = patterns or ['cartesian', 'orbital']
     all_sequences, metadata = [], []
@@ -437,7 +441,7 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, in
             
             raw_data = simulate_and_extract_data(sim, t_max=T, n_points= T*10 + stride, stride=stride)
 
-            sequences = prep_pretrain_minimal(raw_data, n_context, include_masses, round_to)
+            sequences = prep_pretrain_minimal(raw_data, n_context, include_masses, round_to, answer_token)
             
             all_sequences.extend(sequences)
             metadata.extend([{'pattern': pattern, 'n_bodies': n_bodies, 'instance': instance,
@@ -445,18 +449,22 @@ def create_dataset_with_params(patterns=None, n_bodies=3, n_context=5, T=100, in
     
     return {'sequences': all_sequences, 'metadata': metadata,
             'config': {'n_bodies': n_bodies, 'n_context': n_context, 
-                      'include_masses': include_masses, 'patterns': patterns}}
+                      'include_masses': include_masses, 'patterns': patterns,
+                      'answer_token': answer_token}}
 
 # from constant import MASK_TOK
-MASK_TOK = '<mask>'
+# MASK_TOK = '<mask>'
+ANSWER_TOK = '<a>'
 
 class TinyTokenizer: 
     def __init__(self):
         chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 
-                 '.', '|', 'M', '\n', '-', ',', MASK_TOK]
+                 '.', '|', 'M', '\n', '-', ',', ANSWER_TOK]
         self.vocab = {char: i for i, char in enumerate(chars)}
         self.inverse_vocab = {i: char for char, i in self.vocab.items()}
         self.vocab_size = len(self.vocab)
+        self.answer_token = ANSWER_TOK
+        self.answer_token_id = self.vocab[self.answer_token]
 
         pat = sorted(self.vocab.keys(), key=len, reverse=True)
         self.pattern = re.compile('|'.join(re.escape(p) for p in pat))
@@ -515,6 +523,7 @@ def gen():
         stride=1,
         T=1000,
         include_masses=True,
+        answer_token='<a>'
     )
 
     tok = TinyTokenizer()
