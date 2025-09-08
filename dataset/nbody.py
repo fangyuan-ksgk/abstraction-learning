@@ -509,7 +509,7 @@ def simulate():
 
 # Datset Class 
 # --------------------------------------------------------------------------------------------------------------------------
-from base import BaseDataset, compute_hier_seq_len
+from dataset.base import BaseDataset, compute_hier_seq_len
 from dataclasses import dataclass, field
 from typing import List
 import numpy as np
@@ -528,7 +528,7 @@ class NBodyDataset(BaseDataset):
     include_masses: bool = True
     K: int = 2
     L: int = 3
-    filepath: str = 'dataset/nbody/sequences.bin'
+    # filepath: str = 'dataset/nbody/sequences.bin'
     tokenizer: TinyTokenizer = TinyTokenizer()
     answer_token: str = TinyTokenizer().answer_token
     answer_token_id: int = TinyTokenizer().answer_token_id

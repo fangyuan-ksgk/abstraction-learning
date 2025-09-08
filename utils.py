@@ -465,107 +465,97 @@ def extend_abstract_tokens(batch_data: HierSeq, t_extend: int):
             abs_tok_ts = abs_tok_ts[(abs_tok_ts <= start_ts + t_extend) & (abs_tok_ts >= start_ts)]
             batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
 
-def remove_pad_tokens(batch_data: HierSeq): 
-    """In-place removal of PAD tokens"""
-    pad_mask = torch.logical_and(batch_data.levels>0, batch_data.tokens==MASK_TOK)
-    batch_data.tokens = batch_data.tokens[~pad_mask]
-    batch_data.levels = batch_data.levels[~pad_mask]
-    batch_data.timestamps = batch_data.timestamps[~pad_mask]
-    batch_data.sample_idx = batch_data.sample_idx[~pad_mask]
 
 
-def remove_abs_toks(batch_data: HierSeq, remove_ts: torch.Tensor): 
-    abs_mask = (batch_data.levels > 0)
-    remove_mask = torch.full(batch_data.tokens.shape, False)
+def pad_abstract_token_per_sample(batch_data: HierSeq, from_timestamps: Optional[torch.Tensor] = None, to_timestamps: Optional[torch.Tensor] = None): 
+    """Used to extend query abstractions / answer abstractions with per-sample timestamps"""
+    assert from_timestamps is not None or to_timestamps is not None, " - Either from_timestamps and to_timestamps must be provided"
+    if from_timestamps is not None: 
+        assert from_timestamps.shape[0] == batch_data.indices.shape[0], " - from_timestamps must have the same length as batch_data.indices"
+    if to_timestamps is not None: 
+        assert to_timestamps.shape[0] == batch_data.indices.shape[0], " - to_timestamps must have the same length as batch_data.indices"
 
-    for i, sample_idx in enumerate(batch_data.indices):
-        if remove_ts[i] == -1: 
-            continue # no backtracking
-        sample_remove_mask = (abs_mask) & (batch_data.sample_idx == sample_idx) & (batch_data.timestamps > remove_ts[i])
-        remove_mask = remove_mask | sample_remove_mask
-        # print(f" - remove abstract tokens to sample {sample_idx} beyond timestamp: {remove_ts[i]}")
-
-    batch_data.tokens = batch_data.tokens[~remove_mask]
-    batch_data.levels = batch_data.levels[~remove_mask]
-    batch_data.timestamps = batch_data.timestamps[~remove_mask]
-    batch_data.sample_idx = batch_data.sample_idx[~remove_mask]
-
-    # sanity check (To be removed)
-    level_mask = (batch_data.levels > 0)
     for i, sample_idx in enumerate(batch_data.indices): 
         sample_mask = batch_data.sample_idx == sample_idx
-        if remove_ts[i] == -1: continue
-        assert batch_data.timestamps[sample_mask & level_mask][-1] <= remove_ts[i], " - Remove timestamp is not correct"
+        sample_timestamps = batch_data.timestamps[sample_mask]
+        start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
 
-def slice_prefix_before_pad(hierseq, pad_token=MASK_TOK):
+        for l in range(1, batch_data.L): 
+            level_mask = batch_data.levels[sample_mask] == l
+            level_timestamps = sample_timestamps[level_mask]
 
-    prefix_indices = []
-    for b in hierseq.indices: 
-        sample_mask = hierseq.sample_idx == b
-        sample_levels = hierseq.levels[sample_mask]
-        sample_positions = torch.where(sample_mask)[0]
-        
-        sample_tokens = hierseq.tokens[sample_mask]
-        pad_positions = torch.where(torch.logical_and(sample_tokens == pad_token, sample_levels > 0))[0]
-        
-        if len(pad_positions) > 0:
-            first_pad_local = pad_positions[0].item()
-            prefix_indices.extend(sample_positions[:first_pad_local].tolist())
-        else:
-            prefix_indices.extend(sample_positions.tolist())
+            if from_timestamps is not None: 
+                assert level_mask.any(), f" - level {l} abstraction does not exist, but try to pad from {from_timestamps[i]}"
     
-    assert len(prefix_indices)>0, "Prefix HierSeq is empty, indicating it begin with abstract tokens that are padded."
-    
-    prefix_indices = torch.tensor(prefix_indices)
-    
-    return HierSeq(
-        tokens=hierseq.tokens[prefix_indices],
-        levels=hierseq.levels[prefix_indices],
-        timestamps=hierseq.timestamps[prefix_indices],
-        sample_idx=hierseq.sample_idx[prefix_indices],
-        batch_size=hierseq.batch_size,
-        K=hierseq.K,
-        L=hierseq.L
-    )
+                level_start_ts, level_end_ts = level_timestamps[0], level_timestamps[-1]
+                assert (level_end_ts < from_timestamps[i] <= level_end_ts + batch_data.K **l), f" - level {l} abstraction ends at {level_end_ts}, but pad from {from_timestamps[i]}, this either skip abstraction or pad on existing ones"
+
+                assert level_end_ts < end_ts, f" - level {l} abstraction ends at {level_end_ts}, but end_ts is {end_ts} | nothing to pad"
+                # pad till the end
+                abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+                abs_tok_ts = abs_tok_ts[(abs_tok_ts < end_ts) & (abs_tok_ts >= from_timestamps[i])]
+                batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
+            elif to_timestamps is not None: 
+                assert not level_mask.any(), f" - level {l} abstraction already exists, but try to pad to {to_timestamps[i]}"
+                assert to_timestamps[i] >= start_ts, f" - level {l} abstraction starts at {start_ts}, but pad to {to_timestamps[i]}"
+                assert to_timestamps[i] <= end_ts, f" - level {l} abstraction starts at {start_ts}, but pad to {to_timestamps[i]}"
+                # pad from the start
+                abs_tok_ts = torch.arange(start_ts - 1, to_timestamps[i], batch_data.K ** l)
+                abs_tok_ts = abs_tok_ts[(abs_tok_ts < to_timestamps[i]) & (abs_tok_ts >= start_ts)]
+                batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
 
 
-def merge_prefix(prefix_batch, original_batch, mask_token=MASK_TOK):
-    """Assume one extra abstract token generated in prefix HierSeq, use it to replace [MASK] token in original HierSeq"""
-    
-    n_replaced = 0
-    for b in original_batch.indices: 
+def pad_answer_abstract_tokens(batch_data: HierSeq, answer_token_id: int):
+    answer_mask = (batch_data.tokens == answer_token_id) & (batch_data.levels == 0)
+    assert answer_mask.sum() > 0, "No answer token found in the batch"
+    answer_timestamps = batch_data.timestamps[answer_mask]
 
-        orig_mask = original_batch.sample_idx == b
-        prefix_mask = prefix_batch.sample_idx == b
-        
-        orig_positions = torch.where(orig_mask)[0]
-        orig_tokens = original_batch.tokens[orig_mask]
-        orig_levels = original_batch.levels[orig_mask]
+    pad_abstract_token_per_sample(batch_data, from_timestamps=answer_timestamps)
 
-        mask_locs = torch.where(torch.logical_and(orig_tokens==mask_token, orig_levels>0))[0]
-        
-        if len(mask_locs) == 0:
-            continue  # No MASK to replace
-        
-        prefix_positions = torch.where(prefix_mask)[0]
-        if len(prefix_positions) == 0:
-            continue
-            
-        new_token_idx = prefix_positions[-1]
-        new_token = prefix_batch.tokens[new_token_idx]
-        
-        first_mask_global_idx = orig_positions[mask_locs[0]]
-        # print(f"Replacing {original_batch.tokens[first_mask_global_idx]} with {new_token} at {first_mask_global_idx}")
 
-        assert original_batch.levels[first_mask_global_idx] == prefix_batch.levels[new_token_idx], \
-            f"Level mismatch: expected {prefix_batch.levels[new_token_idx]}, got {original_batch.levels[first_mask_global_idx]}"
-        assert original_batch.timestamps[first_mask_global_idx] == prefix_batch.timestamps[new_token_idx], \
-            f"Timestamp mismatch: expected {prefix_batch.timestamps[new_token_idx]}, got {original_batch.timestamps[first_mask_global_idx]}"
-        
-        original_batch.tokens[first_mask_global_idx] = new_token
-        n_replaced += 1
 
-    return n_replaced
+# Query generation utils | infer mask for query tokens | slice HierSeq that contains only query tokens
+# --------------------------------------------------------------------------------------------------------------------------
+def infer_query_mask(batch_data: HierSeq, answer_token_id: int): 
+
+    query_mask = torch.zeros_like(batch_data.sample_idx).bool()
+    answer_token_mask = (batch_data.tokens == answer_token_id) & (batch_data.levels == 0)
+    answer_token_timestamps = batch_data.timestamps[answer_token_mask]
+
+    if answer_token_timestamps.shape[0] == 0: 
+        return query_mask
+    assert answer_token_timestamps.shape[0] == batch_data.indices.shape[0], "Number of answer tokens must match number of samples"
+
+    for i, idx in enumerate(batch_data.indices): 
+        sample_mask = (batch_data.sample_idx == idx)
+        sample_query_mask = (batch_data.timestamps <= answer_token_timestamps[i]) & sample_mask
+        query_mask = query_mask | sample_query_mask
+
+    return query_mask   
+
+def slice_query_hseq(batch_data: HierSeq, answer_token_id: int): 
+
+    query_mask = infer_query_mask(batch_data, answer_token_id)
+    batch_data.tokens = batch_data.tokens[query_mask]
+    batch_data.levels = batch_data.levels[query_mask]
+    batch_data.timestamps = batch_data.timestamps[query_mask]
+    batch_data.sample_idx = batch_data.sample_idx[query_mask]
+
+
+def append_hseq(query_hseq: HierSeq, hseq: HierSeq): 
+    """Add missing timestamps to query HierSeq, using hseq | assumption is hseq is complete, and query_hseq misses token from a certain timestamp for each sample"""
+    for idx in query_hseq.sample_idx: 
+        sample_mask = (query_hseq.sample_idx == idx)
+        end_ts = query_hseq.timestamps[sample_mask][-1]
+        sample_append_mask = (hseq.timestamps > end_ts) & (hseq.sample_idx == idx)
+
+        stitch_idx = torch.where(sample_mask)[0][-1].item() + 1
+        query_hseq.tokens = torch.cat([query_hseq.tokens[:stitch_idx], hseq.tokens[sample_append_mask], query_hseq.tokens[stitch_idx:]])
+        query_hseq.levels = torch.cat([query_hseq.levels[:stitch_idx], hseq.levels[sample_append_mask], query_hseq.levels[stitch_idx:]])
+        query_hseq.timestamps = torch.cat([query_hseq.timestamps[:stitch_idx], hseq.timestamps[sample_append_mask], query_hseq.timestamps[stitch_idx:]])
+        query_hseq.sample_idx = torch.cat([query_hseq.sample_idx[:stitch_idx], hseq.sample_idx[sample_append_mask], query_hseq.sample_idx[stitch_idx:]])
+
+
 
 
 def save_tokenized_binary(sequences, tokenizer, sample_len, output_path='nbody.bin'):

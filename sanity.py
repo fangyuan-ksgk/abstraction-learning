@@ -31,6 +31,7 @@ def sanity_check_same_abs_toks(batch_data: HierSeq):
 # Useful for poking around, stop when encountered error on HierSeq 
 def check_hierseq_complete(batch_data: HierSeq): 
     no_missing = True
+    assert batch_data.indices.size(0) == batch_data.batch_size, f"Batch size {batch_data.batch_size} mismatch with indices number {batch_data.indices.size(0)}"
     for sample_idx in batch_data.indices: 
         sample_mask = batch_data.sample_idx == sample_idx
 
@@ -85,3 +86,8 @@ def sanity_check_repeat_hseq(rep_hseq: HierSeq, gat: GAT):
     print("Sanity check passed for repeated HierSeq: all repeated samples have same avg. ppl")
 
 
+def inspect_seq(hseq: HierSeq, dataset):
+    traj_mask = hseq.levels == 0
+    seq_id = hseq.tokens[traj_mask].tolist()
+    seq = dataset.tokenizer.decode(seq_id)
+    print(seq)

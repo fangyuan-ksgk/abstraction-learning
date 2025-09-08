@@ -20,8 +20,8 @@ def compute_hier_seq_len(seq: list, L: int, K: int) -> int:
 # -----------------------------------------------------------------------
 @dataclass
 class BaseDataset(ABC): 
-    num_data: int
     filepath: str 
+    num_data: Optional[int] = None
     vocab_size: Optional[int] = None 
     L: int = 1
     K: int = 8
@@ -64,7 +64,6 @@ class BaseDataset(ABC):
                 if field_name not in excluded_fields:
                     config[field_name] = getattr(self, field_name)
             
-            config['token_count'] = len(self.sequences)
             json.dump(config, f, indent=2)
         
         print(f"Saved {len(self.sequences)} sequences to {self.filepath}")
@@ -103,6 +102,11 @@ class BaseDataset(ABC):
         if Path(config_path).exists():
             with open(config_path, 'r') as f:
                 config = json.load(f)
+            
+            # The filepath argument to this method takes precedence over the one in the config.
+            if 'filepath' in config:
+                del config['filepath']
+            
             dataset = cls(**config, filepath=filepath)
         else:
             dataset = cls(filepath=filepath)

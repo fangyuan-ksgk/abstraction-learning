@@ -1,15 +1,17 @@
+import math
 import torch 
 
 from model import GAT 
-from utils import HierSeq, pad_abstract_tokens, extend_abstract_tokens, get_unique_ordered
+from utils import HierSeq, pad_abstract_tokens, extend_abstract_tokens, get_unique_ordered, append_hseq
+from utils import pad_answer_abstract_tokens, slice_query_hseq
+
 import numpy as np
 
 from dataclasses import dataclass
 from typing import Optional
 
 
-
-# Get Batch functional 
+# Get Batch functional  | for training, no timestamp for answer is required, for evaluation we need it
 # --------------------------------------------------------------------------------------------------------------------------
 
 def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
@@ -340,10 +342,32 @@ def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: fl
     return repeat_batch
 
 
+# Query & Answer rollout functionals 
+# --------------------------------------------------------------------------------------------------------------------------
+
+def generate_query_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: float, answer_token_id: int):
+
+    repeat_batch = repeat_hseq(batch_data, n)
+    slice_query_hseq(repeat_batch, answer_token_id)
+
+    pad_abstract_tokens(repeat_batch)
+    repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
+
+    return repeat_batch 
+
+
+def generate_answer_rollout_data(gat: GAT, batch_data: HierSeq, answer_token_id: int, n: int = 1, temperature: float = 0.0):
+
+    repeat_batch = repeat_hseq(batch_data, n)
+    pad_answer_abstract_tokens(repeat_batch, answer_token_id)
+    repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
+    return repeat_batch
+
+
 # Pick best abstraction from rollout data & Repeat it to original length
 # --------------------------------------------------------------------------------------------------------------------------
 
-def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor) -> HierSeq: 
+def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate: bool = True) -> HierSeq: 
     """Pick best abstraction for each sample & repeat to original length"""
 
     traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
@@ -354,7 +378,8 @@ def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor) -> HierSeq
 
     select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
     select_batch = select_hseq(repeat_batch, select_mask)
-    select_batch = repeat_hseq(select_batch, repeat_batch.batch_size // select_batch.batch_size)
+    if duplicate: 
+        select_batch = repeat_hseq(select_batch, repeat_batch.batch_size // select_batch.batch_size)
 
     return select_batch
 
@@ -376,6 +401,21 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
 
     # select
     select_batch = select_best_abstraction(repeat_batch, ppt)
+
+    return select_batch
+
+
+def sorl_search_query(gat: GAT, batch_data: HierSeq, n: int, temperature: float, answer_token_id: int):
+    """Select from query-based abstractions (only one) & add answer HierSeq back"""
+
+    repeat_batch = generate_query_rollout_data(gat, batch_data, n, temperature, answer_token_id)
+
+    ppt = gat(repeat_batch)
+
+    select_batch = select_best_abstraction(repeat_batch, ppt, duplicate=False)
+
+    # In-place answer HierSeq appending
+    append_hseq(select_batch, batch_data)
 
     return select_batch
 
@@ -582,6 +622,25 @@ def compute_abs_ssl_loss(repeat_batch, ppt, level):
 
     return ssl_loss
 
+# Curriculum search step increment
+# --------------------------------------------------------------------------------------------------------------------------
+
+def compute_curriculum_t_increment(num_iterations: int, context_length: int, K: int, max_data_size: Optional[int]=None): 
+    
+    # maximal data length
+    if max_data_size is None: 
+        max_data_size = context_length
+    else: 
+        max_data_size = min(max_data_size, context_length)
+
+    # num_iterations & max_data_size to determine a t_search curriculum
+    curriculum_iterations = int(num_iterations * 0.8)
+
+    max_abs_ts = max_data_size // K
+
+    t_increment = math.ceil(max_abs_ts / curriculum_iterations) # additional search time-step per iteration
+
+    return t_increment, max_abs_ts
 
 
 # Quality Metric: 
@@ -644,6 +703,32 @@ def eval_search_improvement(gat: GAT, batch_data: HierSeq, n: int = 5, t_search:
 
     return improve_ppl_percentage.mean() * 100
 
+def compute_traj_ppl_per_sample(hseq: HierSeq, gat: GAT): 
+    
+    ppt = gat(hseq)
+
+    # per-sample traj_ppl computation
+    traj_mask = (hseq.levels[1:] == 0) & (hseq.timestamps[1:] > 1)
+    traj_idx = hseq.sample_idx[1:][traj_mask]
+    traj_ppl = ppt[traj_mask]
+
+    return compute_grouped_mean(traj_ppl, traj_idx)
+
+
+# Evaluation with abstraction search for Query tokens 
+# --------------------------------------------------------------------------------------------------------------------------
+def eval_ppl_with_search(hseq: HierSeq, gat: GAT, answer_token_id: int,
+                        n: int = 4, temperature: float =1.0): 
+    """Search best abstraction for query, then generate answer & evaluate on trajectory perplexity"""
+
+    query_batch_data = sorl_search_query(gat, hseq, n=n, temperature=temperature, answer_token_id=answer_token_id)
+
+    answer_batch_data = generate_answer_rollout_data(gat, query_batch_data, answer_token_id=answer_token_id, n=1, temperature=0.0)
+
+    ppl_per_sample = compute_traj_ppl_per_sample(answer_batch_data, gat)
+
+    return ppl_per_sample
+
 
 # evaluate entropy & ppl deviation
 # --------------------------------------------------------------------------------------------------------------------------
@@ -674,7 +759,7 @@ def eval_entropy_ppl_deviation(gat: GAT, repeat_batch: HierSeq):
 
 # Evaluation Gadget
 # --------------------------------------------------------------------------------------------------------------------------
-def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: int, temperature: float = 0.0): 
+def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: Optional[int] = None, temperature: float = 0.0): 
 
     repeat_batch = repeat_hseq(batch_data, 1)
 
@@ -689,7 +774,8 @@ def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: int, temperatur
     for idx in repeat_batch.indices: 
         for l in range(1, repeat_batch.L): 
             abs_mask = (repeat_batch.levels == l) & (repeat_batch.sample_idx == idx)
-            info_str += f"Sample {idx} Abstract Tokens at level {l}: {repeat_batch.tokens[abs_mask].tolist()}\n"
+            orig_idx = repeat_batch.idx_map[idx].item()
+            info_str += f"Sample {orig_idx} Abstract Tokens at level {l}: {repeat_batch.tokens[abs_mask].tolist()}\n"
 
     return info_str
 
@@ -710,9 +796,10 @@ class SORLConfig:
     temperature: float = 1.0
     num_iterations: int = 10
     joint_steps: int = 20
-    max_length: int = 2048 
+    context_length: int = 2048 
     learning_rate: float = 1e-3
-    t_search: Optional[int] = None
+    t_curriculum: bool = True
+    log_interval: int = 100
 
     # dataset 
     dataset_name: str = "2body_2k"
@@ -747,7 +834,7 @@ class SORLv2Config:
     beta: float = 0.1
     per_token_reward: bool = False
     t_search: Optional[int] = None
-
+    
     # dataset 
     dataset_name: str = "2body_2k"
     dataset_path: str = "dataset/nbody/2body_2k.bin"
