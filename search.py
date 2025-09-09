@@ -36,60 +36,20 @@ def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
 
 # Buffer object
 # --------------------------------------------------------------------------------------------------------------------------
+from collections import defaultdict
 
-
-class Buffer:
-
-    def __init__(self, size: int, device: str = "cpu"): 
+class Buffer: 
+    def __init__(self, size: int): 
         self.size = size
-        self.rl_loss = torch.ones(size, dtype=torch.float32, device=device) * 999.
-        self.improve_ppl_percentage = torch.ones(size, dtype=torch.float32, device=device) * -100.
-        self.count = torch.zeros(size, dtype=torch.int32, device=device)
-        self.max_learnt_rl_loss = 999.
-
-    def update(self, indices: torch.Tensor, rl_loss: Optional[torch.Tensor] = None, improve_ppl_percentage: Optional[torch.Tensor] = None, learn: bool = False): 
-        if rl_loss is not None: 
-            self.rl_loss[indices] = rl_loss
-            if learn: 
-                self.count[indices] += 1
-                self.max_learnt_rl_loss = max(self.max_learnt_rl_loss, rl_loss.max())
-
-        if improve_ppl_percentage is not None: 
-            self.improve_ppl_percentage[indices] = improve_ppl_percentage
-
-    @property 
-    def indices(self): 
-        """Debugging purpose"""
-        # order indices | increase in 'count', then in 'rl_loss'
-        indices = torch.arange(len(self.count))
-        return indices
-        sort_keys = torch.stack([self.count, self.rl_loss], dim=1)
-        sorted_indices = indices[torch.argsort(sort_keys, dim=0)[:, 0]]
-        return sorted_indices
-
-    @property
-    def can_skip(self): 
-        raise NotImplementedError("Not implemented")
-
-
-    def get_batch(self, sequences: list, lengths: list, max_length: int, L: int, K: int):
-        # rand_idx = np.random.randint(0, len(sequences))
-        batch = []
-        indices = []
-        curr_len = 0
-
-        for idx in self.indices:
-            seq = sequences[idx]
-            l = lengths[idx]
-
-            if curr_len + l > max_length:
-                break
-            batch.append(([seq] + [[] for _ in range(1, L)], None))
-            indices.append(idx)
-            curr_len += l
-
-        batch_data = HierSeq.from_hierarchical_data(batch, K=K, L=L, sample_indices=indices)
-        return batch_data
+        self.record = defaultdict(list)
+    
+    def update(self, hseq: HierSeq): 
+        h_seqs, h_timestamps = hseq.to_hierarchical_data()
+        for i, idx in enumerate(hseq.indices): 
+            if hseq.idx_map is not None: 
+                i = hseq.idx_map[idx] # original index in dataset
+            self.record[i].append(h_seqs[i][1:]) # record abstract tokens only
+            self.record[i].append(h_timestamps[i][1:])
 
 
 # Relevant function for SoRL training for GAT | Essentially a combination of GRPO & SSl - abstraction trained with RL, trajectory trained with SSL
@@ -110,7 +70,8 @@ def repeat_hseq(batch_data: HierSeq, n_copies: int):
         repeats
     )
 
-    unique_original_indices = batch_data.sample_idx.unique(sorted=True)  # Get actual unique sample indices
+    unique_original_indices = batch_data.indices
+    # unique_original_indices = batch_data.sample_idx.unique(sorted=True)  # Get actual unique sample indices
     idx_map = unique_original_indices.repeat(n_copies)  # Map each new sample back to its original
 
     replicated_batch_data = HierSeq(
@@ -230,6 +191,8 @@ def compute_grouped_max(values: torch.Tensor, indices: torch.Tensor) -> torch.Te
     return maxs
 
 
+# (TBD). Implement a parameterized version of "reluctant argmax operation" - favors stability over changes 
+
 def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
 
     unique_groups, inverse = torch.unique(indices, return_inverse=True)
@@ -342,6 +305,22 @@ def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: fl
     return repeat_batch
 
 
+# Sitch together temp=0.0 sampled HierSeq with temp>0.0 sampled HierSeq
+# --------------------------------------------------------------------------------------------------------------------------
+
+def concatenate_hseq(hseq1, hseq2):
+
+    hseq1.sample_idx = torch.cat([hseq1.sample_idx, hseq2.sample_idx + hseq1.batch_size])
+    hseq1.batch_size = hseq1.batch_size + hseq2.batch_size
+    hseq1.idx_map = torch.cat([hseq1.idx_map, hseq2.idx_map])
+
+    hseq1.tokens = torch.cat([hseq1.tokens, hseq2.tokens])
+    hseq1.levels = torch.cat([hseq1.levels, hseq2.levels])
+    hseq1.timestamps = torch.cat([hseq1.timestamps, hseq2.timestamps])
+
+    return hseq1
+
+
 # Query & Answer rollout functionals 
 # --------------------------------------------------------------------------------------------------------------------------
 
@@ -404,9 +383,35 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
 
     return select_batch
 
+def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None): 
+    """Explore, Evaluate, Select || Pinned greedy sample ver."""
+    
+    if t_search is not None and t_search == 0: 
+        return repeat_hseq(batch_data, n)
+
+    # explore
+    assert n > 1, "n must be greater than 1"
+    ref_batch = generate_rollout_data(gat, batch_data, 1, 0.0, t_search)
+    explore_batch = generate_rollout_data(gat, batch_data, n-1, temperature, t_search)
+
+    ref_batch = concatenate_hseq(ref_batch, explore_batch)
+
+    # evaluate 
+    ppt = gat(ref_batch)
+
+    # select
+    select_batch = select_best_abstraction(ref_batch, ppt)
+
+    return select_batch
+
+
+
+
+from sanity import sanity_check_repeat_batch
 
 def sorl_search_query(gat: GAT, batch_data: HierSeq, n: int, temperature: float, answer_token_id: int):
     """Select from query-based abstractions (only one) & add answer HierSeq back"""
+    # (Potential Issue). It's likely that timestamp of answer token is not maintained in 'repeat_batch'
 
     repeat_batch = generate_query_rollout_data(gat, batch_data, n, temperature, answer_token_id)
 
@@ -624,7 +629,6 @@ def compute_abs_ssl_loss(repeat_batch, ppt, level):
 
 # Curriculum search step increment
 # --------------------------------------------------------------------------------------------------------------------------
-
 def compute_curriculum_t_increment(num_iterations: int, context_length: int, K: int, max_data_size: Optional[int]=None): 
     
     # maximal data length
@@ -633,10 +637,9 @@ def compute_curriculum_t_increment(num_iterations: int, context_length: int, K: 
     else: 
         max_data_size = min(max_data_size, context_length)
 
-    # num_iterations & max_data_size to determine a t_search curriculum
     curriculum_iterations = int(num_iterations * 0.8)
 
-    max_abs_ts = max_data_size // K
+    max_abs_ts = (max_data_size-1) // K * K # last timestamp needs no abstraction
 
     t_increment = math.ceil(max_abs_ts / curriculum_iterations) # additional search time-step per iteration
 

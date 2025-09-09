@@ -120,8 +120,7 @@ class HierSeq:
     def to_hierarchical_data(self):     
         samples = []
         timestamps = []
-        sample_indices = torch.unique(self.sample_idx, sorted=True)
-        for idx in sample_indices: 
+        for idx in self.indices: 
             sample, timestamp = [], []
             for l in range(self.L): 
                 sample_level_mask = (self.sample_idx == idx) & (self.levels == l)
@@ -544,7 +543,7 @@ def slice_query_hseq(batch_data: HierSeq, answer_token_id: int):
 
 def append_hseq(query_hseq: HierSeq, hseq: HierSeq): 
     """Add missing timestamps to query HierSeq, using hseq | assumption is hseq is complete, and query_hseq misses token from a certain timestamp for each sample"""
-    for idx in query_hseq.sample_idx: 
+    for idx in query_hseq.indices: 
         sample_mask = (query_hseq.sample_idx == idx)
         end_ts = query_hseq.timestamps[sample_mask][-1]
         sample_append_mask = (hseq.timestamps > end_ts) & (hseq.sample_idx == idx)
@@ -555,6 +554,7 @@ def append_hseq(query_hseq: HierSeq, hseq: HierSeq):
         query_hseq.timestamps = torch.cat([query_hseq.timestamps[:stitch_idx], hseq.timestamps[sample_append_mask], query_hseq.timestamps[stitch_idx:]])
         query_hseq.sample_idx = torch.cat([query_hseq.sample_idx[:stitch_idx], hseq.sample_idx[sample_append_mask], query_hseq.sample_idx[stitch_idx:]])
 
+    return query_hseq
 
 
 

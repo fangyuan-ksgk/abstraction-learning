@@ -91,3 +91,13 @@ def inspect_seq(hseq: HierSeq, dataset):
     seq_id = hseq.tokens[traj_mask].tolist()
     seq = dataset.tokenizer.decode(seq_id)
     print(seq)
+
+
+def answer_token_count_sanity_check(hseq: HierSeq, answer_token_id: int): 
+    answer_mask = (hseq.tokens == answer_token_id) & (hseq.levels == 0)
+    assert answer_mask.sum() > 0, "No answer token found in the batch"
+    assert hseq.sample_idx[answer_mask].size(0) == hseq.indices.size(0), f"Number of answer tokens {hseq.sample_idx[answer_mask].size(0)} must match number of samples {hseq.indices.size(0)}"
+
+
+def sanity_check_repeat_batch(repeat_batch: HierSeq, batch_data: HierSeq):
+    assert (repeat_batch.idx_map[repeat_batch.indices] == batch_data.indices).all(), "Repeat batch indices do not match batch data indices"
