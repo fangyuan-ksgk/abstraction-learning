@@ -101,3 +101,11 @@ def answer_token_count_sanity_check(hseq: HierSeq, answer_token_id: int):
 
 def sanity_check_repeat_batch(repeat_batch: HierSeq, batch_data: HierSeq):
     assert (repeat_batch.idx_map[repeat_batch.indices] == batch_data.indices).all(), "Repeat batch indices do not match batch data indices"
+
+
+def print_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.Tensor): 
+    n_unique_indices = torch.unique(repeat_batch.idx_map).size(0)
+    n_switch_abstraction = (argmax_indices >= n_unique_indices).sum().item()
+    ratio = n_switch_abstraction / n_unique_indices
+    # print(f" - number of switched abstraction: {n_switch_abstraction}, ratio: {ratio:.4f}")
+    return ratio
