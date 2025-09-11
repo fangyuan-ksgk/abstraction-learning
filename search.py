@@ -265,7 +265,7 @@ def compute_grouped_weak_argmax(values: torch.Tensor, indices: torch.Tensor, idx
 
     # per-original-group argmax 
     orig_idx = idx_map[unique_indices]
-    max_mask = compute_weak_group_argmax_mask(means, orig_idx, indices, switch_abs_ppl_threshold)
+    max_mask = compute_weak_group_argmax_mask(means, orig_idx, unique_indices, switch_abs_ppl_threshold)
     argmax_indices = unique_indices[max_mask]
 
     # returned indices are in current indices space
@@ -431,7 +431,7 @@ def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_
     """Explore, Evaluate, Select || Pinned greedy sample ver."""
     
     if t_search is not None and t_search == 0: 
-        return repeat_hseq(batch_data, n)
+        return repeat_hseq(batch_data, n), 0.0
 
     # explore
     assert n > 1, "n must be greater than 1"
@@ -673,22 +673,79 @@ def compute_abs_ssl_loss(repeat_batch, ppt, level):
 
 # Curriculum search step increment
 # --------------------------------------------------------------------------------------------------------------------------
-def compute_curriculum_t_increment(num_iterations: int, context_length: int, K: int, max_data_size: Optional[int]=None): 
+def compute_curriculum_t_increment(num_iterations: int, context_length: int, K: int, max_ts: Optional[int]=None,
+                                   num_loops: int = 1): 
     
     # maximal data length
-    if max_data_size is None: 
-        max_data_size = context_length
+    if max_ts is None: 
+        max_ts = context_length
     else: 
-        max_data_size = min(max_data_size, context_length)
+        max_ts = min(max_ts, context_length)
 
-    curriculum_iterations = int(num_iterations * 0.8)
+    curriculum_iterations = int(num_iterations // num_loops * 0.8)
 
-    max_abs_ts = (max_data_size-1) // K * K # last timestamp needs no abstraction
+    max_abs_ts = (max_ts-1) // K * K # last timestamp needs no abstraction
 
     t_increment = math.ceil(max_abs_ts / curriculum_iterations) # additional search time-step per iteration
 
     return t_increment, max_abs_ts
 
+
+def curriculum_iter(t_search: int, t_delta: int, t_max: int): 
+    t_search += t_delta
+    return t_search if t_search <= t_max else 0
+
+# Phase Annealing Scheduler 
+#   We perform phase transition (inner_loop_num, switch_abs_ppl_threshold) using (switch_ratio) metric 
+#   When meaning stabilizes (switch_ratio < threshold), we switch from commitment stage to search stage
+# --------------------------------------------------------------------------------------------------------------------------
+
+# Remark: once into search stage, the returning condition should NOT be the same threshold. Search stage has much higher swtich_abstraction_ratio
+class PhaseScheduler: 
+    def __init__(self, init_joint_steps: int, init_abs_switch_ppl_threshold: float, 
+                 window_size: int = 100, switch_ratio_threshold: float = 0.1, 
+                 adv_decrease_tolerance: float = 0.2): 
+        self.init_joint_steps = init_joint_steps
+        self.init_abs_switch_ppl_threshold = init_abs_switch_ppl_threshold
+        self.window_size = window_size
+        self.switch_ratio_threshold = switch_ratio_threshold
+        self.record = []
+        self.joint_steps = self.init_joint_steps
+        self.abs_switch_ppl_threshold = self.init_abs_switch_ppl_threshold
+        self.phase = "commitment"
+
+        self.best_abs_advantage = 0.0
+        self.abs_decrease_tolerance = adv_decrease_tolerance
+
+    def __call__(self, switch_ratio: Optional[float] = None, ppl_improve: Optional[float] = None) -> tuple[int, float]: 
+        if switch_ratio is not None: 
+            self.update_switch_ratio(switch_ratio)
+        elif ppl_improve is not None: 
+            self.update_advantage(ppl_improve)
+        else: 
+            raise ValueError("Either switch_ratio or ppl_improve must be provided")
+       
+    def update_switch_ratio(self, switch_ratio: float) -> None: 
+        self.record.extend([switch_ratio] * self.joint_steps)
+        if len(self.record) >= self.window_size and np.mean(self.record[-self.window_size:]) < self.switch_ratio_threshold: 
+            self.joint_steps, self.abs_switch_ppl_threshold = 1, 0.0 
+            if self.phase == "commitment": 
+                self.phase = "search"
+                print(f" :: Switch to search stage | mean switch ratio: {np.mean(self.record[-self.window_size:]):.4f} | threshold: {self.switch_ratio_threshold:.4f} | current switch ratio: {switch_ratio:.4f}")
+      
+    def update_advantage(self, ppl_improve: float) -> None: 
+        if self.phase == "commitment": 
+            self.best_abs_advantage = max(self.best_abs_advantage, ppl_improve)
+        else: 
+            if ppl_improve < self.best_abs_advantage * (1 - self.abs_decrease_tolerance): 
+                self.joint_steps, self.abs_switch_ppl_threshold = self.init_joint_steps, self.init_abs_switch_ppl_threshold
+                self.phase = "commitment"
+                self.record = [] 
+                print(f" :: Switch to commitment stage | current abs_advantage: {ppl_improve:.4f} | best abs_advantage: {self.best_abs_advantage:.4f}")
+
+    @property 
+    def rvg_switch_ratio(self): 
+        return np.mean(self.record[-self.window_size:])
 
 # Quality Metric: 
 # (Embedding deviation)
@@ -849,6 +906,11 @@ class SORLConfig:
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
     switch_abs_ppl_threshold: float = 0.0 # if > 0.0, use weak-argmax selection that retains greedy sample (for stability)
+    num_loops: int = 1
+
+    anneal_window_size: int = 200
+    anneal_threshold: float = 0.1
+    anneal_adv_decrease_tolerance: float = 0.2
 
     # dataset 
     dataset_name: str = "2body_2k"
@@ -883,6 +945,9 @@ class SORLv2Config:
     beta: float = 0.1
     per_token_reward: bool = False
     t_search: Optional[int] = None
+    num_loops: int = 1
+    anneal_window_size: int = 200
+    anneal_threshold: float = 0.1
     
     # dataset 
     dataset_name: str = "2body_2k"
