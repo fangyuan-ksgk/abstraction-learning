@@ -192,7 +192,7 @@ def compute_grouped_max(values: torch.Tensor, indices: torch.Tensor) -> torch.Te
 
 
 # (TBD). Implement a parameterized version of "reluctant argmax operation" - favors stability over changes 
-
+# (TBD). Report 'advantage over greedy choice' value, too
 def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
 
     unique_groups, inverse = torch.unique(indices, return_inverse=True)
@@ -201,6 +201,8 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
 
     max_values = torch.full((num_groups,), -float('inf'), device=device)
     max_values.scatter_reduce_(0, inverse, values, reduce='amax', include_self=True)
+
+    rollout_advantages = torch.zeros(len(indices))
 
     is_max = (values == max_values[inverse])
 
@@ -216,12 +218,15 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
     final_mask = torch.zeros_like(values, dtype=torch.bool)
     valid_indices = min_indices[min_indices <= len(values)]
     final_mask[valid_indices] = True
-    
-    return final_mask
+
+    rollout_advantages[valid_indices] = values[valid_indices] - max_values[inverse[valid_indices]]
+
+    return final_mask, rollout_advantages
 
 def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1) -> torch.Tensor: 
         
     weak_argmax_mask = torch.zeros(len(orig_idx), dtype=torch.bool)
+    rollout_advantages = torch.zeros(len(orig_idx))
 
     for idx in orig_idx: 
         assert (indices[orig_idx == idx] == indices[orig_idx == idx].sort().values).all(), "First group is NOT the first appearance"
@@ -229,6 +234,7 @@ def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, 
         rollout_ppl = means[orig_idx == idx]
         greedy_ppl = rollout_ppl[0]
         better_rollout_mask = rollout_ppl <= (greedy_ppl - switch_abs_ppl_threshold) # rollout ppl is better (smaller) than greedy ppl
+        rollout_advantages[orig_idx == idx][better_rollout_mask] = greedy_ppl - rollout_ppl[better_rollout_mask] 
 
         if better_rollout_mask.any(): 
             abs_idx = indices[orig_idx == idx][better_rollout_mask][0]
@@ -237,7 +243,7 @@ def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, 
     
         weak_argmax_mask[abs_idx] = True
 
-    return weak_argmax_mask
+    return weak_argmax_mask, rollout_advantages
 
 
 def compute_grouped_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map: torch.Tensor): 
@@ -249,11 +255,11 @@ def compute_grouped_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map:
 
     # per-original-group argmax 
     orig_idx = idx_map[unique_indices]
-    max_mask = compute_grouped_max_mask(means, orig_idx)
+    max_mask, rollout_advantages = compute_grouped_max_mask(means, orig_idx)
     argmax_indices = unique_indices[max_mask]
 
     # returned indices are in current indices space
-    return argmax_indices
+    return argmax_indices, rollout_advantages[max_mask]
 
 
 def compute_grouped_weak_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
@@ -265,11 +271,11 @@ def compute_grouped_weak_argmax(values: torch.Tensor, indices: torch.Tensor, idx
 
     # per-original-group argmax 
     orig_idx = idx_map[unique_indices]
-    max_mask = compute_weak_group_argmax_mask(means, orig_idx, unique_indices, switch_abs_ppl_threshold)
+    max_mask, rollout_advantages = compute_weak_group_argmax_mask(means, orig_idx, unique_indices, switch_abs_ppl_threshold)
     argmax_indices = unique_indices[max_mask]
 
     # returned indices are in current indices space
-    return argmax_indices
+    return argmax_indices, rollout_advantages[max_mask]
 
 
 # Per-abstract-token reward & advantage computation 
@@ -385,19 +391,19 @@ def generate_answer_rollout_data(gat: GAT, batch_data: HierSeq, answer_token_id:
 from sanity import print_switch_abstraction_ratio
 
 def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate: bool = True, switch_abs_ppl_threshold: float = 0.0) -> tuple[HierSeq, float]: 
-    """Pick best abstraction for each sample & repeat to original length"""
+    """Pick best abstraction for each sample & repeat to original length || prioritize first occurance of max values when equal"""
 
     traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
     traj_idx = repeat_batch.sample_idx[1:][traj_mask]
     traj_ppl = ppt[traj_mask]
 
-    if switch_abs_ppl_threshold > 0.0: 
-        argmax_indices = compute_grouped_weak_argmax(traj_ppl, traj_idx, repeat_batch.idx_map, switch_abs_ppl_threshold)
-    else: 
-        argmax_indices = compute_grouped_argmax(traj_ppl, traj_idx, repeat_batch.idx_map)
+    # if switch_abs_ppl_threshold > 0.0: 
+    argmax_indices, rollout_advantages = compute_grouped_weak_argmax(traj_ppl, traj_idx, repeat_batch.idx_map, switch_abs_ppl_threshold)
+    # else: 
+    #     argmax_indices, rollout_advantages = compute_grouped_argmax(traj_ppl, traj_idx, repeat_batch.idx_map)
 
     # (TBD. remove this gadget) Information logging for visibility
-    switch_ratio = print_switch_abstraction_ratio(repeat_batch, argmax_indices)
+    switch_ratio = print_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages)
 
     select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
     select_batch = select_hseq(repeat_batch, select_mask)
@@ -432,6 +438,9 @@ def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_
     
     if t_search is not None and t_search == 0: 
         return repeat_hseq(batch_data, n), 0.0
+
+    if n == 1: 
+        return sorl_search(gat, batch_data, n, temperature, t_search)
 
     # explore
     assert n > 1, "n must be greater than 1"
