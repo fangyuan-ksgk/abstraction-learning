@@ -222,27 +222,30 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
     rollout_advantages[valid_indices] = values[valid_indices] - max_values[inverse[valid_indices]]
 
     return final_mask, rollout_advantages
+    
 
-def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1) -> torch.Tensor: 
-        
+def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
     weak_argmax_mask = torch.zeros(len(orig_idx), dtype=torch.bool)
     rollout_advantages = torch.zeros(len(orig_idx))
 
-    for idx in orig_idx: 
-        assert (indices[orig_idx == idx] == indices[orig_idx == idx].sort().values).all(), "First group is NOT the first appearance"
+    for idx in orig_idx:
+        sample_mask = (orig_idx == idx)
+        assert (indices[sample_mask] == indices[sample_mask].sort().values).all(), "First group is NOT the first appearance"
         
-        rollout_ppl = means[orig_idx == idx]
+        # Pick the best rollout that satisfies the threshold condition
+        rollout_ppl = means[sample_mask]
         greedy_ppl = rollout_ppl[0]
-        better_rollout_mask = rollout_ppl <= (greedy_ppl - switch_abs_ppl_threshold) # rollout ppl is better (smaller) than greedy ppl
-        rollout_advantages[orig_idx == idx][better_rollout_mask] = greedy_ppl - rollout_ppl[better_rollout_mask] 
+        rollout_advantages[sample_mask] = greedy_ppl - rollout_ppl
 
-        if better_rollout_mask.any(): 
-            abs_idx = indices[orig_idx == idx][better_rollout_mask][0]
-        else: 
-            abs_idx = indices[orig_idx == idx][0]
-    
+        mask = (rollout_ppl <= greedy_ppl - switch_abs_ppl_threshold)
+        mask[0] = True
+
+        effective_ppl = torch.where(mask, rollout_ppl, torch.tensor(float('inf')))
+        abs_idx = torch.argmin(effective_ppl)
+        abs_idx = torch.where(sample_mask)[0][abs_idx]
+
         weak_argmax_mask[abs_idx] = True
-
+        
     return weak_argmax_mask, rollout_advantages
 
 
