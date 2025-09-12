@@ -103,9 +103,12 @@ def sanity_check_repeat_batch(repeat_batch: HierSeq, batch_data: HierSeq):
     assert (repeat_batch.idx_map[repeat_batch.indices] == batch_data.indices).all(), "Repeat batch indices do not match batch data indices"
 
 
-def print_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.Tensor): 
+def print_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.Tensor, rollout_advantages: torch.Tensor): 
     n_unique_indices = torch.unique(repeat_batch.idx_map).size(0)
     n_switch_abstraction = (argmax_indices >= n_unique_indices).sum().item()
     ratio = n_switch_abstraction / n_unique_indices
-    # print(f" - number of switched abstraction: {n_switch_abstraction}, ratio: {ratio:.4f}")
+    avg_advantage = rollout_advantages[rollout_advantages > 0].mean()
+    avg_advantage = avg_advantage.item() if not avg_advantage.isnan() else 0.0
+    print(f" - number of switched abstraction: {n_switch_abstraction}, ratio: {ratio:.4f}")
+    print(f" - average advantage over greedy choice: {avg_advantage:.4f}")
     return ratio
