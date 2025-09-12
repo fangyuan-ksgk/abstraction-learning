@@ -702,50 +702,16 @@ def curriculum_iter(t_search: int, t_delta: int, t_max: int):
 
 # Remark: once into search stage, the returning condition should NOT be the same threshold. Search stage has much higher swtich_abstraction_ratio
 class PhaseScheduler: 
-    def __init__(self, init_joint_steps: int, init_abs_switch_ppl_threshold: float, 
-                 window_size: int = 100, switch_ratio_threshold: float = 0.1, 
-                 adv_decrease_tolerance: float = 0.2): 
+    def __init__(self, init_joint_steps: int, init_abs_switch_ppl_threshold: float): 
         self.init_joint_steps = init_joint_steps
         self.init_abs_switch_ppl_threshold = init_abs_switch_ppl_threshold
-        self.window_size = window_size
-        self.switch_ratio_threshold = switch_ratio_threshold
-        self.record = []
+
         self.joint_steps = self.init_joint_steps
         self.abs_switch_ppl_threshold = self.init_abs_switch_ppl_threshold
         self.phase = "commitment"
 
-        self.best_abs_advantage = 0.0
-        self.abs_decrease_tolerance = adv_decrease_tolerance
-
-    def __call__(self, switch_ratio: Optional[float] = None, ppl_improve: Optional[float] = None) -> tuple[int, float]: 
-        if switch_ratio is not None: 
-            self.update_switch_ratio(switch_ratio)
-        elif ppl_improve is not None: 
-            self.update_advantage(ppl_improve)
-        else: 
-            raise ValueError("Either switch_ratio or ppl_improve must be provided")
-       
-    def update_switch_ratio(self, switch_ratio: float) -> None: 
-        self.record.extend([switch_ratio] * self.joint_steps)
-        if len(self.record) >= self.window_size and np.mean(self.record[-self.window_size:]) < self.switch_ratio_threshold: 
-            self.joint_steps, self.abs_switch_ppl_threshold = 1, 0.0 
-            if self.phase == "commitment": 
-                self.phase = "search"
-                print(f" :: Switch to search stage | mean switch ratio: {np.mean(self.record[-self.window_size:]):.4f} | threshold: {self.switch_ratio_threshold:.4f} | current switch ratio: {switch_ratio:.4f}")
-      
-    def update_advantage(self, ppl_improve: float) -> None: 
-        if self.phase == "commitment": 
-            self.best_abs_advantage = max(self.best_abs_advantage, ppl_improve)
-        else: 
-            if ppl_improve < self.best_abs_advantage * (1 - self.abs_decrease_tolerance): 
-                self.joint_steps, self.abs_switch_ppl_threshold = self.init_joint_steps, self.init_abs_switch_ppl_threshold
-                self.phase = "commitment"
-                self.record = [] 
-                print(f" :: Switch to commitment stage | current abs_advantage: {ppl_improve:.4f} | best abs_advantage: {self.best_abs_advantage:.4f}")
-
-    @property 
-    def rvg_switch_ratio(self): 
-        return np.mean(self.record[-self.window_size:])
+    def __call__(self) -> tuple[int, float]: 
+        raise NotImplementedError("PhaseScheduler is not implemented")
 
 # Quality Metric: 
 # (Embedding deviation)
@@ -906,11 +872,6 @@ class SORLConfig:
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
     switch_abs_ppl_threshold: float = 0.0 # if > 0.0, use weak-argmax selection that retains greedy sample (for stability)
-    num_loops: int = 1
-
-    anneal_window_size: int = 200
-    anneal_threshold: float = 0.1
-    anneal_adv_decrease_tolerance: float = 0.2
 
     # dataset 
     dataset_name: str = "2body_2k"
