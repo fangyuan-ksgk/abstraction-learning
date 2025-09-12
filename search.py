@@ -222,7 +222,7 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
     rollout_advantages[valid_indices] = values[valid_indices] - max_values[inverse[valid_indices]]
 
     return final_mask, rollout_advantages
-    
+
 
 def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
     weak_argmax_mask = torch.zeros(len(orig_idx), dtype=torch.bool)
@@ -400,20 +400,16 @@ def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate:
     traj_idx = repeat_batch.sample_idx[1:][traj_mask]
     traj_ppl = ppt[traj_mask]
 
-    # if switch_abs_ppl_threshold > 0.0: 
     argmax_indices, rollout_advantages = compute_grouped_weak_argmax(traj_ppl, traj_idx, repeat_batch.idx_map, switch_abs_ppl_threshold)
-    # else: 
-    #     argmax_indices, rollout_advantages = compute_grouped_argmax(traj_ppl, traj_idx, repeat_batch.idx_map)
 
-    # (TBD. remove this gadget) Information logging for visibility
-    switch_ratio = print_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages)
+    switch_ratio = print_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages) # (to be removed)
 
     select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
     select_batch = select_hseq(repeat_batch, select_mask)
     if duplicate: 
         select_batch = repeat_hseq(select_batch, repeat_batch.batch_size // select_batch.batch_size)
 
-    return select_batch, switch_ratio # (TBD. remove switch_ratio, it's used for logging purpose only)
+    return select_batch, switch_ratio, rollout_advantages # (TBD. remove switch_ratio, rollout_advantages, theses are for logging purpose only)
 
 
 # 2-in-1 search function: generate rollout & select best abstraction & repeat to original length
@@ -432,7 +428,7 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
     ppt = gat(repeat_batch)
 
     # select
-    select_batch, switch_ratio = select_best_abstraction(repeat_batch, ppt)
+    select_batch, switch_ratio, rollout_advantages = select_best_abstraction(repeat_batch, ppt)
 
     return select_batch, switch_ratio
 
@@ -456,11 +452,27 @@ def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_
     ppt = gat(ref_batch)
 
     # select | include threshold for weak-argmax selection that retains greedy sample (for stability)
-    select_batch, switch_ratio = select_best_abstraction(ref_batch, ppt, switch_abs_ppl_threshold=switch_abs_ppl_threshold)
+    select_batch, switch_ratio, rollout_advantages = select_best_abstraction(ref_batch, ppt, switch_abs_ppl_threshold=switch_abs_ppl_threshold)
 
-    return select_batch, switch_ratio
+    return select_batch, switch_ratio, rollout_advantages
 
 
+# Dynamic threshold adjustment function
+# --------------------------------------------------------------------------------------------------------------------------
+def adjust_threshold(switch_ratio, rollout_advantages, config, ratio_target: float = 0.2): 
+    thres_target = ratio_target * rollout_advantages.max()
+    if switch_ratio > ratio_target: 
+        increment = abs(thres_target - config.abs_switch_ppl_threshold) * 0.9
+        config.abs_switch_ppl_threshold += increment
+        config.abs_switch_ppl_threshold = max(0., config.abs_switch_ppl_threshold)
+        print(f"Threshold increased to {config.abs_switch_ppl_threshold}")
+    elif switch_ratio < ratio_target: 
+        decrement = abs(config.abs_switch_ppl_threshold - thres_target) * 0.9
+        config.abs_switch_ppl_threshold -= decrement
+        config.abs_switch_ppl_threshold = max(0., config.abs_switch_ppl_threshold)
+        print(f"Threshold decreased to {config.abs_switch_ppl_threshold}")
+
+# --------------------------------------------------------------------------------------------------------------------------
 
 
 from sanity import sanity_check_repeat_batch
@@ -473,7 +485,7 @@ def sorl_search_query(gat: GAT, batch_data: HierSeq, n: int, temperature: float,
 
     ppt = gat(repeat_batch)
 
-    select_batch, _ = select_best_abstraction(repeat_batch, ppt, duplicate=False)
+    select_batch, _, _ = select_best_abstraction(repeat_batch, ppt, duplicate=False)
 
     # In-place answer HierSeq appending
     append_hseq(select_batch, batch_data)
@@ -884,6 +896,7 @@ class SORLConfig:
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
     switch_abs_ppl_threshold: float = 0.0 # if > 0.0, use weak-argmax selection that retains greedy sample (for stability)
+    switch_ratio_target: Optional[float] = None # if None, don't adjust threshold, otherwise, dynamically adjust threshold
 
     # dataset 
     dataset_name: str = "2body_2k"
