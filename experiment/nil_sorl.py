@@ -2,7 +2,7 @@
 # --------------------------------
 
 from model import GATConfig, GAT
-from dataset.arithmetic import ArithmeticDataset
+from dataset.arithmetic import ArithmeticDataset, ArithmeticHierDataset
 from nil import annotate_abstraction, supervise_gat, sorl_gat
 from dataclasses import asdict
 from search import SORLConfig 
@@ -57,16 +57,17 @@ wandb.init(
 
 for gen in range(config.nil_num_generations):
     gen_prefix = f"Generation {gen+1}"
-    
+
     # (1). Reset / Initialize GAT
     gat = GAT(gat_config)
 
     # (2). Weak-supervision (if previous generation exists) 
     if gen > 0: 
         gat = supervise_gat(record_dataset, gat, config.nil_weak_iterations, config.context_length, wandb_log_prefix=gen_prefix+".weak")
-
+    
     # (3). Train with SoRL 
     gat = sorl_gat(dataset, id_val_dataset, ood_val_dataset, gat, config, wandb_log_prefix=gen_prefix+".sorl")
 
     # (4). Record abstraction 
-    record_dataset = annotate_abstraction(dataset, gat, config.context_length, config.temperature)
+    record_dataset = ArithmeticHierDataset.from_dataset(dataset)
+    record_dataset = annotate_abstraction(record_dataset, gat, config.context_length, config.temperature)

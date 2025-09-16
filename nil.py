@@ -88,7 +88,7 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
         t_search, t_delta, t_max = config.context_length, 0, 0
 
     global_step = 0 
-    optimizer = torch.optim.Adam(gat.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(gat.parameters(), lr=config.learning_rate)
 
     while global_step < config.num_iterations: 
 
