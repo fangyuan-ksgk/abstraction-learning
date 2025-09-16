@@ -920,9 +920,10 @@ def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: Optional[int] =
 from model import GATConfig
 
 
-# Ver.3 SoRL (with GRPO / RL loss)
+# Ver.3 SoRL | with NIL gadget
 @dataclass
 class SORLConfig: 
+
     # model configuration 
     gat_config: GATConfig
 
@@ -936,8 +937,10 @@ class SORLConfig:
     t_curriculum: bool = True
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
-    switch_abs_ppl_threshold: float = 0.0 # if > 0.0, use weak-argmax selection that retains greedy sample (for stability)
-    switch_ratio_target: Optional[float] = None # if None, don't adjust threshold, otherwise, dynamically adjust threshold
+
+    # NIL config
+    nil_weak_iterations: int = 100 
+    nil_num_generations: int = 3 
 
     # dataset 
     dataset_name: str = "2body_2k"

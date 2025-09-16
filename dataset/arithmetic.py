@@ -119,3 +119,8 @@ class ArithmeticHierDataset(BaseHierDataset):
         instance.sequences = hier_seqs
         instance.lengths = dataset.lengths
         return instance       
+
+    def save(self, filepath: Optional[str] = None): 
+        if filepath is not None:
+            self.filepath = filepath
+        self._save()
