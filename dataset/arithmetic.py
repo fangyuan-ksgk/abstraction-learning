@@ -1,6 +1,6 @@
 # Arithmetic Experiments Data Generation 
 # ---------------------------------------------------------------------------------
-from dataset.base import BaseDataset
+from dataset.base import BaseDataset, BaseHierDataset
 from dataclasses import dataclass, field
 from typing import Optional
 import random
@@ -88,3 +88,34 @@ class ArithmeticDataset(BaseDataset):
         self.lengths = [len(seq) for seq in self.sequences]
         self._save()
         return self
+
+
+@dataclass 
+class ArithmeticHierDataset(BaseHierDataset): 
+    min_digit: int = 1
+    max_digit: int = 3
+    num_data: int = 10000000
+    filepath: str = "dataset/multiplication/sequences_hier.bin"
+    vocab_size: Optional[int] = None 
+
+    tokenizer: DigitTokenizer = DigitTokenizer()
+    answer_token: str = DigitTokenizer().answer_token
+    answer_token_id: int = DigitTokenizer().answer_token_id
+
+    @classmethod 
+    def from_dataset(cls, dataset: ArithmeticDataset): 
+        
+        hier_seqs = []
+        for seq in dataset.sequences: 
+            hier_seq = [seq] + [[] for _ in range(1, dataset.L)]
+            hier_seqs.append(hier_seq)
+
+        instance = cls(
+            filepath=dataset.filepath.replace(".bin", "_hier.bin"),
+            num_data=len(hier_seqs),
+            K=dataset.K,
+            L=dataset.L,
+        )
+        instance.sequences = hier_seqs
+        instance.lengths = dataset.lengths
+        return instance       

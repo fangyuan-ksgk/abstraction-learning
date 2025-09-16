@@ -15,6 +15,7 @@ from typing import Optional
 # --------------------------------------------------------------------------------------------------------------------------
 
 def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
+    """Get batch of non-hierachical sequences"""
     rand_idx = np.random.randint(0, len(sequences))
     batch = []
     sample_indices = []
@@ -33,6 +34,46 @@ def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
     batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
     return batch_data
 
+def get_hier_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
+    """Get batch of hierachical sequences"""
+    rand_idx = np.random.randint(0, len(sequences))
+    batch = []
+    sample_indices = []
+    curr_len = 0
+
+    for idx in range(rand_idx, len(sequences) + rand_idx):
+        idx = idx % len(sequences)
+        seq = sequences[idx]
+        l = lengths[idx]
+        if curr_len + l > max_length:
+            break
+        batch.append((seq, None))
+        sample_indices.append(idx)
+        curr_len += l
+
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
+    return batch_data
+
+# Get batch with consecutive indices from 'start_idx' | no wrapping around
+def get_hier_batch_with_index(sequences: list, lengths: list, max_length: int, L: int, K: int, start_idx: int): 
+
+    batch = [] 
+    sample_indices = []
+    curr_len = 0
+
+    for idx in range(start_idx, len(sequences) + start_idx): 
+        if idx >= len(sequences): 
+            break
+        seq = sequences[idx]
+        l = lengths[idx]
+        if curr_len + l > max_length:
+            break
+        batch.append((seq, None))
+        sample_indices.append(idx)
+        curr_len += l
+        
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
+    return batch_data
 
 # Buffer object
 # --------------------------------------------------------------------------------------------------------------------------
