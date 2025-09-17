@@ -51,8 +51,8 @@ def make_interleave_embd(state_embd, act_embd):
     interleave_embd = torch.stack(interleave_embd, dim=0)
     return interleave_embd
 
-def get_unique_ordered(tensor): 
-    diff = torch.cat([torch.tensor([True]), tensor[1:] != tensor[:-1]])
+def get_unique_ordered(tensor: torch.Tensor): 
+    diff = torch.cat([torch.tensor([True], device=tensor.device), tensor[1:] != tensor[:-1]])
     unique_ordered = tensor[diff]
     return unique_ordered
 
