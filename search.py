@@ -477,10 +477,10 @@ def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_
     """Explore, Evaluate, Select || Pinned greedy sample ver."""
     
     if t_search is not None and t_search == 0: 
-        return repeat_hseq(batch_data, n), 0.0
+        return repeat_hseq(batch_data, n), 0.0, torch.tensor([0.0])
 
     if n == 1: 
-        return sorl_search(gat, batch_data, n, temperature, t_search)
+        return sorl_search(gat, batch_data, n, temperature, t_search), 0.0, torch.tensor([0.0])
 
     # explore
     assert n > 1, "n must be greater than 1"
@@ -915,6 +915,8 @@ def observe_abstraction(batch_data: HierSeq, gat: GAT, t_search: Optional[int] =
     return info_str
 
 
+
+
 # Experiment Configuration 
 # --------------------------------------------------------------------------------------------------------------------------
 from model import GATConfig
@@ -937,7 +939,8 @@ class SORLConfig:
     t_curriculum: bool = True
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
-
+    num_val_iterations: int = 10
+    
     # NIL config
     nil_weak_iterations: int = 100 
     nil_num_generations: int = 3 
@@ -991,3 +994,38 @@ class SORLv2Config:
     ood_validate_dataset_path: str = "dataset/nbody/3body_100.bin"
 
 
+# Evaluation Gadget
+# --------------------------------------------------------------------------------------------------------------------------
+
+from dataset.base import BaseDataset
+import torch
+
+
+def evaluate_gat(gat: GAT, val_dataset: BaseDataset, config: SORLConfig, t_search: Optional[int] = None, t_max: Optional[int] = None):
+    
+    improve_ppl_val = torch.tensor([0.0])
+    traj_ppl_val = torch.tensor([0.0])
+    info_str = ""
+
+    for i in range(config.num_val_iterations): 
+
+        val_data = get_batch(val_dataset.sequences, val_dataset.lengths, config.context_length, gat.L, gat.K)
+
+        with torch.no_grad(): 
+            improve_ppl_val += eval_search_improvement(gat, val_data, t_search=t_search)
+
+        if t_search == t_max and config.t_curriculum: 
+            traj_ppl_val += eval_ppl_with_search(val_data, gat, val_dataset.answer_token_id, n=6, temperature=1.0).mean()
+        elif not config.t_curriculum: 
+            traj_ppl_val += eval_generate_ppl(gat, val_data, n=1, temperature=0.0, t_search=t_search).mean()
+        else: 
+            traj_ppl_val += torch.tensor([0.0])
+
+        # Generate the info string only on the first validation iteration
+        if i == 0:
+            info_str = observe_abstraction(val_data, gat, t_search)
+
+    improve_ppl_val /= config.num_val_iterations
+    traj_ppl_val /= config.num_val_iterations
+
+    return improve_ppl_val, traj_ppl_val, info_str

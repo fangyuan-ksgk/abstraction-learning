@@ -27,8 +27,8 @@ config = SORLConfig(gat_config=gat_config,
            t_curriculum=True,
            log_interval=100,
            use_v2=True,
-           nil_weak_iterations=100,
-           nil_num_generations=3,
+           nil_weak_iterations=20,
+           nil_num_generations=4,
 
            dataset_name="100K-123", 
            dataset_path="dataset/multiplication/100K-123.bin",
@@ -47,7 +47,7 @@ ood_val_dataset = ArithmeticDataset.from_file(config.ood_validate_dataset_path)
 # ------------------------------------------------------------------------------------------------
 wandb.init(
     project="abstraction-learning2", 
-    name=f"SoRL-with-NIL",
+    name=f"SoRL-with-NIL-val10-weak50",
     config=asdict(config)
 )
 
@@ -55,6 +55,7 @@ wandb.init(
 # Generation Bottleneck Experiment set-ups
 # ------------------------------------------------------------------------------------------------
 
+total_step = 0
 for gen in range(config.nil_num_generations):
     gen_prefix = f"Generation {gen+1}"
 
@@ -63,10 +64,10 @@ for gen in range(config.nil_num_generations):
 
     # (2). Weak-supervision (if previous generation exists) 
     if gen > 0: 
-        gat = supervise_gat(record_dataset, gat, config.nil_weak_iterations, config.context_length, wandb_log_prefix=gen_prefix+".weak")
+        gat, total_step = supervise_gat(record_dataset, gat, config.nil_weak_iterations, config.context_length, total_step, wandb_log_prefix=gen_prefix+".weak")
     
     # (3). Train with SoRL 
-    gat = sorl_gat(dataset, id_val_dataset, ood_val_dataset, gat, config, wandb_log_prefix=gen_prefix+".sorl")
+    gat, total_step = sorl_gat(dataset, id_val_dataset, ood_val_dataset, gat, config, total_step, wandb_log_prefix=gen_prefix+".sorl")
 
     # (4). Record abstraction 
     record_dataset = ArithmeticHierDataset.from_dataset(dataset)

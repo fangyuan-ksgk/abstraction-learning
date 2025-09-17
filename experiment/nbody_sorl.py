@@ -5,17 +5,14 @@ from model import GATConfig, GAT
 from dataset.arithmetic import ArithmeticDataset
 
 from dataclasses import asdict
-from search import SORLConfig 
+from search import SORLConfig, evaluate_gat
 import wandb
 
 
 # Configuration
 gat_config = GATConfig(K=3, L=2, n_embd=128, n_head=4, n_layer=4, device="cpu", _compile=False,
                        vocab_size_list=[17, 8])
-        
-# (TBD). Remove the t_curriculum loops gadget, seems redundant, no obvious improvement
-# (TBD). Remove the 'phase change / ratio switch' gadget, it leads to degradation on train / val loss
-
+    
 
 config = SORLConfig(gat_config=gat_config,
            n_generations=3, 
@@ -27,7 +24,8 @@ config = SORLConfig(gat_config=gat_config,
            t_curriculum=True,
            log_interval=100,
            use_v2=True,
-
+           num_val_iterations=10,
+           
            dataset_name="100K-123", 
            dataset_path="dataset/multiplication/100K-123.bin",
            id_validate_dataset_name="2k-123",
@@ -56,7 +54,6 @@ import copy
 import wandb
 import torch
 from search import compute_curriculum_t_increment, compute_abs_ssl_loss, compute_ssl_loss, get_batch, observe_abstraction, eval_search_improvement, sorl_search, sorl_search_v2, curriculum_iter, adjust_threshold
-from search import eval_ppl_with_search, eval_generate_ppl
 
 
 n = config.n_generations # number of generations per sample
@@ -64,6 +61,7 @@ temperature = config.temperature
 num_iterations = config.num_iterations 
 context_length = config.context_length
 switch_abs_ppl_threshold = config.switch_abs_ppl_threshold
+num_val_iterations = config.num_val_iterations
 
 if config.t_curriculum: 
     t_search = 0
@@ -105,29 +103,14 @@ while global_step < num_iterations:
         torch.cuda.empty_cache()
 
     if global_step % config.log_interval == 0:
-
-        val_data = get_batch(id_val_dataset.sequences, id_val_dataset.lengths, context_length, gat.L, gat.K)
         
         with torch.no_grad(): 
             improve_ppl_train = eval_search_improvement(gat, batch_data, t_search=t_search)
             print(f"\nImprove ppl percentage (train): {improve_ppl_train:.4f}")
 
-            improve_ppl_val = eval_search_improvement(gat, val_data, t_search=t_search)
-            print(f"\nImprove ppl percentage (val): {improve_ppl_val:.4f}")
-        
-            if t_search == t_max and config.t_curriculum: 
-                traj_ppl_val = eval_ppl_with_search(val_data, gat, dataset.answer_token_id, n=6, temperature=1.0)
-                print(f"Traj ppl (val): {traj_ppl_val.mean().item():.4f}\n")
-            elif not config.t_curriculum: 
-                traj_ppl_val = eval_generate_ppl(gat, val_data, n=1, temperature=0.0, t_search=t_search).mean()
-                print(f"Traj ppl (val): {traj_ppl_val.item():.4f}\n")
-            else: 
-                traj_ppl_val = torch.tensor([0.0])
+        improve_ppl_val, traj_ppl_val, info_str = evaluate_gat(gat, id_val_dataset, config, t_search, t_max)
 
-            info_str = observe_abstraction(val_data, gat, t_search)
-            print(info_str)
-            wandb.log({"val/info_str": wandb.Table(columns=["info"], data=[[info_str]])}, step=global_step)
-
+        wandb.log({"val/info_str": wandb.Table(columns=["info"], data=[[info_str]])}, step=global_step)
         
         wandb.log({
             "train/loss": loss.item(), 
@@ -146,9 +129,9 @@ while global_step < num_iterations:
             "progress/abs_switch_ppl_threshold": switch_abs_ppl_threshold,
         }, step=global_step)
 
-    print(f"Iteration {global_step+1}/{num_iterations} "
-                f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}")
-    
+        print(f"Iteration {global_step+1}/{num_iterations} "
+                    f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}")
+        
 
     global_step += 1
 
