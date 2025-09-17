@@ -119,8 +119,8 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
             # Validation needs to be more rigorous : more samples
             with torch.no_grad(): 
                 improve_ppl_train = eval_search_improvement(gat, batch_data, t_search=t_search)
-
-            improve_ppl_val, traj_ppl_val, info_str = evaluate_gat(gat, id_val_dataset, config, t_search, t_max)
+                improve_ppl_val, traj_ppl_val, info_str = evaluate_gat(gat, id_val_dataset, config, t_search, t_max)
+                
             wandb.log({f"{wandb_log_prefix}/val/info_str": wandb.Table(columns=["info"], data=[[info_str]])}, step=global_step)
             
             wandb.log({

@@ -941,7 +941,7 @@ class SORLConfig:
     t_curriculum: bool = True
     log_interval: int = 100
     use_v2: bool = True # if True, use v2 search function
-    num_val_iterations: int = 10
+    num_val_iterations: int = 4
     
     # NIL config
     nil_weak_iterations: int = 100 
