@@ -14,7 +14,7 @@ from typing import Optional
 # Get Batch functional  | for training, no timestamp for answer is required, for evaluation we need it
 # --------------------------------------------------------------------------------------------------------------------------
 
-def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
+def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int, device: str = "cpu"):
     """Get batch of non-hierachical sequences"""
     rand_idx = np.random.randint(0, len(sequences))
     batch = []
@@ -31,10 +31,10 @@ def get_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
         sample_indices.append(idx)
         curr_len += l
 
-    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L, device=device)
     return batch_data
 
-def get_hier_batch(sequences: list, lengths: list, max_length: int, L: int, K: int):
+def get_hier_batch(sequences: list, lengths: list, max_length: int, L: int, K: int, device: str = "cpu"):
     """Get batch of hierachical sequences"""
     rand_idx = np.random.randint(0, len(sequences))
     batch = []
@@ -51,11 +51,11 @@ def get_hier_batch(sequences: list, lengths: list, max_length: int, L: int, K: i
         sample_indices.append(idx)
         curr_len += l
 
-    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L, device=device)
     return batch_data
 
 # Get batch with consecutive indices from 'start_idx' | no wrapping around
-def get_hier_batch_with_index(sequences: list, lengths: list, max_length: int, L: int, K: int, start_idx: int): 
+def get_hier_batch_with_index(sequences: list, lengths: list, max_length: int, L: int, K: int, start_idx: int, device: str = "cpu"): 
 
     batch = [] 
     sample_indices = []
@@ -72,7 +72,7 @@ def get_hier_batch_with_index(sequences: list, lengths: list, max_length: int, L
         sample_indices.append(idx)
         curr_len += l
         
-    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L)
+    batch_data = HierSeq.from_hierarchical_data(batch, sample_indices=sample_indices, K=K, L=L, device=device)
     return batch_data
 
 # Buffer object

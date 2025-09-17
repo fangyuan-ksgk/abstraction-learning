@@ -77,9 +77,10 @@ class HierSeq:
     L: int 
 
     idx_map: dict = None
+    device: str = "cpu"
     
     @classmethod
-    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int,
+    def from_hierarchical_data(cls, samples_data: List[tuple], K: int, L: int, device: str = "cpu",
                               sample_indices: Optional[torch.Tensor] = None):
 
         batch_tokens = []
@@ -93,7 +94,7 @@ class HierSeq:
         for i, (token_seqs, timestamp_seqs) in enumerate(samples_data):
 
             tokens, levels, timestamps = cls._flatten_single_sample(
-                token_seqs, timestamp_seqs, K, L
+                token_seqs, timestamp_seqs, K, L, device
             )
             
             batch_tokens.append(tokens)
@@ -111,10 +112,11 @@ class HierSeq:
             tokens=torch.cat(batch_tokens),
             levels=torch.cat(batch_levels),
             timestamps=torch.cat(batch_timestamps),
-            sample_idx=torch.tensor(batch_sample_idx),
+            sample_idx=torch.tensor(batch_sample_idx, device=device),
             batch_size=len(samples_data),
             K=K,
-            L=L
+            L=L,
+            device=device
         )
     
     def to_hierarchical_data(self):     
@@ -134,7 +136,7 @@ class HierSeq:
     
 
     @staticmethod
-    def _flatten_single_sample(token_sequences: list, timestamp_sequences: Optional[list], K: int, L: int):
+    def _flatten_single_sample(token_sequences: list, timestamp_sequences: Optional[list], K: int, L: int, device: str = "cpu"):
         """Flatten a single hierarchical sample by timestamp ordering."""
 
         if timestamp_sequences is None:
@@ -167,9 +169,9 @@ class HierSeq:
         sorted_timestamps = [item[0] for item in items]
         
         return (
-            torch.tensor(sorted_tokens, dtype=torch.long),
-            torch.tensor(sorted_levels, dtype=torch.long), 
-            torch.tensor(sorted_timestamps, dtype=torch.long)
+            torch.tensor(sorted_tokens, dtype=torch.long, device=device),
+            torch.tensor(sorted_levels, dtype=torch.long, device=device), 
+            torch.tensor(sorted_timestamps, dtype=torch.long, device=device)
         )
     
     def get_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -193,7 +195,8 @@ class HierSeq:
             sample_idx=self.sample_idx.to(device),
             batch_size=self.batch_size,
             K=self.K,
-            L=self.L
+            L=self.L,
+            device=self.device
         )
     
     def __len__(self):
