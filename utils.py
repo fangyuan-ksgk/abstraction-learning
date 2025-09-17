@@ -260,7 +260,7 @@ class HierSeq:
             
             self.levels = torch.cat([
                 self.levels[:insert_pos],
-                torch.tensor([level]),
+                torch.tensor([level], device=self.levels.device),
                 self.levels[suffix_pos:]
             ])
             
@@ -272,7 +272,7 @@ class HierSeq:
             
             self.sample_idx = torch.cat([
                 self.sample_idx[:insert_pos],
-                torch.tensor([sample_idx]),
+                torch.tensor([sample_idx], device=self.sample_idx.device),
                 self.sample_idx[suffix_pos:]
             ])
             
