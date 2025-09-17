@@ -300,14 +300,18 @@ class GAT(nn.Module):
             input_idx, input_levels = batch_data.tokens, batch_data.levels
 
         S = input_idx.shape[0]
+        # Initialize with zeros and add embeddings in a loop
         x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
 
         for l in range(self.L): # per-level embedding
             level_mask = (input_levels == l)
-            if level_mask.any():  
-                level_tokens = input_idx[level_mask]  
-                level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)  # (num_tokens, n_embd) + (1, n_embd)
-                x[:,level_mask] = level_embed
+            level_tokens = input_idx[level_mask]
+            
+            # Unconditional embedding calculation
+            level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)
+            
+            # Use the mask to selectively place the embeddings
+            x = x.masked_scatter_(level_mask.unsqueeze(0).unsqueeze(-1), level_embed.unsqueeze(0))
 
         return x
 
@@ -321,18 +325,20 @@ class GAT(nn.Module):
 
         for l in range(self.L):
             level_mask = (target_levels == l) & loss_mask
-            if not level_mask.any():
-                continue
             
+            # Get the logits for the current level
             level_logits = self.lm_heads[l](x[:, level_mask])
             level_logits = 30 * torch.tanh(level_logits / 30).float()
+            
+            # Compute cross-entropy loss
             level_losses = F.cross_entropy(
                 level_logits.view(-1, level_logits.size(-1)),
                 target_idx[level_mask],
                 reduction="none"
             )
-
-            ppt[level_mask] = level_losses
+            
+            # Use the mask to selectively place the losses
+            ppt = ppt.masked_scatter_(level_mask, level_losses)
 
         return ppt
 
