@@ -1005,8 +1005,8 @@ import torch
 
 def evaluate_gat(gat: GAT, val_dataset: BaseDataset, config: SORLConfig, t_search: Optional[int] = None, t_max: Optional[int] = None):
     
-    improve_ppl_val = torch.tensor([0.0])
-    traj_ppl_val = torch.tensor([0.0])
+    improve_ppl_val = torch.tensor([0.0], device=gat.device)
+    traj_ppl_val = torch.tensor([0.0], device=gat.device)
     info_str = ""
 
     for i in range(config.num_val_iterations): 
@@ -1021,7 +1021,7 @@ def evaluate_gat(gat: GAT, val_dataset: BaseDataset, config: SORLConfig, t_searc
         elif not config.t_curriculum: 
             traj_ppl_val += eval_generate_ppl(gat, val_data, n=1, temperature=0.0, t_search=t_search).mean()
         else: 
-            traj_ppl_val += torch.tensor([0.0])
+            traj_ppl_val += torch.tensor([0.0], device=gat.device)
 
         # Generate the info string only on the first validation iteration
         if i == 0:
