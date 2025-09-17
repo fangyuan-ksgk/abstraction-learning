@@ -112,3 +112,8 @@ def print_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.
     print(f" - number of switched abstraction: {n_switch_abstraction}, ratio: {ratio:.4f}")
     print(f" - average advantage over greedy choice: {avg_advantage:.4f}")
     return ratio
+
+def check_model_device(model):
+    for name, param in model.named_parameters(): 
+        assert param.device.type == model.device, f"parameter {name} not on same device as model"
+    print("All parameters matching module device on", model.device)

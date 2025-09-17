@@ -432,7 +432,13 @@ def generate_answer_rollout_data(gat: GAT, batch_data: HierSeq, answer_token_id:
 
 # Pick best abstraction from rollout data & Repeat it to original length
 # --------------------------------------------------------------------------------------------------------------------------
-from sanity import print_switch_abstraction_ratio
+
+def compute_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.Tensor, rollout_advantages: torch.Tensor): 
+    n_unique_indices = torch.unique(repeat_batch.idx_map).size(0)
+    n_switch_abstraction = (argmax_indices >= n_unique_indices).sum().item()
+    ratio = n_switch_abstraction / n_unique_indices
+    return ratio
+
 
 def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate: bool = True, switch_abs_ppl_threshold: float = 0.0) -> tuple[HierSeq, float]: 
     """Pick best abstraction for each sample & repeat to original length || prioritize first occurance of max values when equal"""
@@ -443,7 +449,7 @@ def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate:
 
     argmax_indices, rollout_advantages = compute_grouped_weak_argmax(traj_ppl, traj_idx, repeat_batch.idx_map, switch_abs_ppl_threshold)
 
-    switch_ratio = print_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages) # (to be removed)
+    switch_ratio = compute_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages) # to be removed
 
     select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
     select_batch = select_hseq(repeat_batch, select_mask)
@@ -515,8 +521,6 @@ def adjust_threshold(switch_ratio, rollout_advantages, config, ratio_target: flo
 
 # --------------------------------------------------------------------------------------------------------------------------
 
-
-from sanity import sanity_check_repeat_batch
 
 def sorl_search_query(gat: GAT, batch_data: HierSeq, n: int, temperature: float, answer_token_id: int):
     """Select from query-based abstractions (only one) & add answer HierSeq back"""
