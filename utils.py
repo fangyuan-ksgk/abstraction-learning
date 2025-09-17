@@ -254,7 +254,7 @@ class HierSeq:
             
             self.tokens = torch.cat([
                 self.tokens[:insert_pos],
-                token.unsqueeze(0) if token.dim() == 0 else token.unsqueeze(0),
+                token.unsqueeze(0).to(self.tokens.device),
                 self.tokens[suffix_pos:]
             ])
             
@@ -266,7 +266,7 @@ class HierSeq:
             
             self.timestamps = torch.cat([
                 self.timestamps[:insert_pos],
-                timestamp.unsqueeze(0) if timestamp.dim() == 0 else timestamp.unsqueeze(0),
+                timestamp.unsqueeze(0).to(self.timestamps.device),
                 self.timestamps[suffix_pos:]
             ])
             
