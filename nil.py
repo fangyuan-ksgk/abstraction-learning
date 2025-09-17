@@ -21,7 +21,7 @@ def annotate_abstraction(record_dataset: BaseHierDataset, gat: GAT, context_leng
 
         # (1). Loop through each sequence (require modified 'get_batch' that returns end index, and start from argumented index)
         batch_data = get_hier_batch_with_index(record_dataset.sequences, record_dataset.lengths, context_length, gat.L, gat.K, 
-                                            start_idx=start_idx)
+                                            start_idx=start_idx, device=gat.device)
         assert (batch_data.levels == 1).sum() == 0, "HierSeq to be annotated should not contain any abstract tokens!"
         next_idx = batch_data.indices[-1] + 1 
 
@@ -45,7 +45,7 @@ def supervise_gat(record_dataset: BaseHierDataset, gat: GAT, num_iterations: int
 
     for i in range(num_iterations):
         global_step = start_step + i
-        batch_data = get_hier_batch(record_dataset.sequences, record_dataset.lengths, context_length, gat.L, gat.K)
+        batch_data = get_hier_batch(record_dataset.sequences, record_dataset.lengths, context_length, gat.L, gat.K, device=gat.device)
 
         ppt = gat(batch_data)
 
@@ -90,7 +90,7 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
         global_step = start_step + i
         gat.train() 
 
-        batch_data = get_batch(dataset.sequences, dataset.lengths, config.context_length // config.n_generations, gat.L, gat.K)
+        batch_data = get_batch(dataset.sequences, dataset.lengths, config.context_length // config.n_generations, gat.L, gat.K, device=gat.device)
 
         with torch.no_grad(): 
     
