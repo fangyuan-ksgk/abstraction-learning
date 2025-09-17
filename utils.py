@@ -437,8 +437,6 @@ def compute_hier_seq_len(seq: list, L: int, K: int) -> int:
     return total + 1
 
 
-# (TBD). Importantly, t_search is not utilized here yet, this means search is not 'progressively done'
-#        rather, it's done in one go. 
 def pad_abstract_tokens(batch_data: HierSeq): 
     abstract_mask = (batch_data.levels > 0)
     assert not abstract_mask.any(), " - Abstract tokens already exist, 'pad_abstract_tokens' requires no abstract tokens"
@@ -449,7 +447,7 @@ def pad_abstract_tokens(batch_data: HierSeq):
         start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
 
         for l in range(1, batch_data.L): 
-            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l, device=start_ts.device)
             batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= start_ts])
 
 def extend_abstract_tokens(batch_data: HierSeq, t_extend: int): 
