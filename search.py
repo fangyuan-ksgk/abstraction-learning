@@ -221,14 +221,14 @@ def compute_grouped_mean(values: torch.Tensor, indices: torch.Tensor) -> torch.T
     """Grouped mean using indices to group values tensor"""
     unique, inverse = torch.unique(indices, return_inverse=True)
     n = len(unique)
-    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+    means = torch.zeros(n, device=values.device).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
     return means
 
 def compute_grouped_max(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor: 
     """Grouped max using indices to group values tensor"""
     unique, inverse = torch.unique(indices, return_inverse=True)
     n = len(unique)
-    maxs = torch.zeros(n).scatter_add_(0, inverse, values)
+    maxs = torch.zeros(n, device=values.device).scatter_add_(0, inverse, values)
     return maxs
 
 
@@ -238,22 +238,21 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
 
     unique_groups, inverse = torch.unique(indices, return_inverse=True)
     num_groups = len(unique_groups)
-    device = values.device
 
-    max_values = torch.full((num_groups,), -float('inf'), device=device)
+    max_values = torch.full((num_groups,), -float('inf'), device=values.device)
     max_values.scatter_reduce_(0, inverse, values, reduce='amax', include_self=True)
 
-    rollout_advantages = torch.zeros(len(indices))
+    rollout_advantages = torch.zeros(len(indices), device=values.device)
 
     is_max = (values == max_values[inverse])
 
     candidate_indices = torch.where(
         is_max, 
-        torch.arange(len(values), device=device), 
+        torch.arange(len(values), device=values.device), 
         len(values) + 1
     )
     
-    min_indices = torch.full((num_groups,), len(values) + 1, device=device, dtype=torch.long)
+    min_indices = torch.full((num_groups,), len(values) + 1, device=values.device, dtype=torch.long)
     min_indices.scatter_reduce_(0, inverse, candidate_indices, reduce='amin', include_self=True)
 
     final_mask = torch.zeros_like(values, dtype=torch.bool)
@@ -267,7 +266,7 @@ def compute_grouped_max_mask(values: torch.Tensor, indices: torch.Tensor) -> tor
 
 def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
     weak_argmax_mask = torch.zeros(len(orig_idx), dtype=torch.bool)
-    rollout_advantages = torch.zeros(len(orig_idx))
+    rollout_advantages = torch.zeros(len(orig_idx), device=orig_idx.device)
 
     for idx in orig_idx:
         sample_mask = (orig_idx == idx)
@@ -295,7 +294,7 @@ def compute_grouped_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map:
     # per-current-group mean (current indices)
     unique_indices, inverse = torch.unique(indices, return_inverse=True)
     n = len(unique_indices)
-    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+    means = torch.zeros(n, device=values.device).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
 
     # per-original-group argmax 
     orig_idx = idx_map[unique_indices]
@@ -311,7 +310,7 @@ def compute_grouped_weak_argmax(values: torch.Tensor, indices: torch.Tensor, idx
     # per-current-group mean (current indices)
     unique_indices, inverse = torch.unique(indices, return_inverse=True)
     n = len(unique_indices)
-    means = torch.zeros(n).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+    means = torch.zeros(n, device=values.device).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
 
     # per-original-group argmax 
     orig_idx = idx_map[unique_indices]
@@ -359,11 +358,10 @@ def compute_token_advantage(rewards, orig_indices, timestamps):
     grouping_tensor = torch.stack([orig_indices, timestamps], dim=1)
     unique_groups, inverse_indices = torch.unique(grouping_tensor, dim=0, return_inverse=True)
     num_groups = len(unique_groups)
-    device = rewards.device
 
     counts = torch.bincount(inverse_indices, minlength=num_groups).float()
-    means = torch.zeros(num_groups, device=device).scatter_add_(0, inverse_indices, rewards) / counts
-    vars = torch.zeros(num_groups, device=device).scatter_add_(0, inverse_indices, rewards**2) / counts - means**2
+    means = torch.zeros(num_groups, device=rewards.device).scatter_add_(0, inverse_indices, rewards) / counts
+    vars = torch.zeros(num_groups, device=rewards.device).scatter_add_(0, inverse_indices, rewards**2) / counts - means**2
     stds = torch.sqrt(torch.clamp(vars, min=1e-8)) # clamp for stability
 
     expanded_means = means[inverse_indices]
