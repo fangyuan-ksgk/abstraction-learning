@@ -382,7 +382,7 @@ def init_critical_ts(batch_data: HierSeq) -> torch.Tensor:
         for l in range(1, batch_data.L):
             K_power = batch_data.K ** l
             start = ((ts[0] - 1) // K_power + 1) * K_power  # First valid timestamp >= ts[0]
-            expected_ts = torch.arange(start, ts[-1], K_power)
+            expected_ts = torch.arange(start, ts[-1], K_power, device=ts[0].device)
             existing_ts = ts[levels == l]
             missing = expected_ts[~torch.isin(expected_ts, existing_ts)]
             
@@ -461,7 +461,7 @@ def extend_abstract_tokens(batch_data: HierSeq, t_extend: int):
         start_ts, end_ts = sample_timestamps[0], sample_timestamps[-1]
 
         for l in range(1, batch_data.L): 
-            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+            abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l, device=start_ts.device)
             abs_tok_ts = abs_tok_ts[(abs_tok_ts <= start_ts + t_extend) & (abs_tok_ts >= start_ts)]
             batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
 
@@ -492,7 +492,7 @@ def pad_abstract_token_per_sample(batch_data: HierSeq, from_timestamps: Optional
 
                 assert level_end_ts < end_ts, f" - level {l} abstraction ends at {level_end_ts}, but end_ts is {end_ts} | nothing to pad"
                 # pad till the end
-                abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l)
+                abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l, device=start_ts.device)
                 abs_tok_ts = abs_tok_ts[(abs_tok_ts < end_ts) & (abs_tok_ts >= from_timestamps[i])]
                 batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
             elif to_timestamps is not None: 
@@ -500,7 +500,7 @@ def pad_abstract_token_per_sample(batch_data: HierSeq, from_timestamps: Optional
                 assert to_timestamps[i] >= start_ts, f" - level {l} abstraction starts at {start_ts}, but pad to {to_timestamps[i]}"
                 assert to_timestamps[i] <= end_ts, f" - level {l} abstraction starts at {start_ts}, but pad to {to_timestamps[i]}"
                 # pad from the start
-                abs_tok_ts = torch.arange(start_ts - 1, to_timestamps[i], batch_data.K ** l)
+                abs_tok_ts = torch.arange(start_ts - 1, to_timestamps[i], batch_data.K ** l, device=start_ts.device)
                 abs_tok_ts = abs_tok_ts[(abs_tok_ts < to_timestamps[i]) & (abs_tok_ts >= start_ts)]
                 batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
 
