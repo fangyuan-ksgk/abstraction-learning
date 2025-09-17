@@ -1011,7 +1011,7 @@ def evaluate_gat(gat: GAT, val_dataset: BaseDataset, config: SORLConfig, t_searc
 
     for i in range(config.num_val_iterations): 
 
-        val_data = get_batch(val_dataset.sequences, val_dataset.lengths, config.context_length, gat.L, gat.K)
+        val_data = get_batch(val_dataset.sequences, val_dataset.lengths, config.context_length, gat.L, gat.K, device=gat.device)
 
         with torch.no_grad(): 
             improve_ppl_val += eval_search_improvement(gat, val_data, t_search=t_search)
