@@ -107,7 +107,7 @@ def repeat_hseq(batch_data: HierSeq, n_copies: int):
     tokens_per_sample = torch.bincount(batch_data.sample_idx)[batch_data.indices]  # [num_tokens_sample_0, num_tokens_sample_1, ...]
     repeats = tokens_per_sample.repeat(n_copies) 
     new_sample_idx = torch.repeat_interleave(
-        torch.arange(original_batch_size * n_copies),
+        torch.arange(original_batch_size * n_copies, device=batch_data.tokens.device),
         repeats
     )
 
