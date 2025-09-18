@@ -12,6 +12,11 @@ import torch
 from utils import HierSeq, repeat_hseq
 from typing import Optional, List
 from gat import GAT
+from torch.distributions import Categorical
+from collections import deque
+import torch.nn.functional as F
+
+# (Your other sorl.py functions like add_rhythmic_placeholders can remain for other experiments)
 
 def add_rhythmic_placeholders(batch_data: HierSeq, level_mask_tokens: torch.Tensor, t_search: Optional[int] = None): 
     """
@@ -85,7 +90,64 @@ def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: fl
     return repeat_batch
 
 
-# Now the question is, how to build other mode rollouts? 
+# Abstract allocation based on perplexity spikes
+# ------------------------------------------------------------------------------------------------
+# - abstraction, like CoT is used to multi-hop, with the goal of reducing perplexity
+# - spikes detectio is more natural as it doesn't break segment with 'consecutive decreasing perplexity'. 
+# - this is analogous to our token growth work, which verifies the effectiveness of this spike detection based approach
+# - for memory fading, this is also more suitable, as then it's like we are using a 'longer token' to replace things
+
+def add_placeholders_at_spikes(
+    gat: GAT,
+    batch_data: HierSeq,
+    perplexity_increase_threshold: float,
+    level_to_add: int = 1,
+):
+    """
+    (TBD). remove threshold, just use sort order to decide place to add abstraction 
+         - also consider default to rhythmic placeholder when tying etc. (to be considered)
+    Analyzes a batch, identifies perplexity spikes based on the increase
+    in perplexity, and inserts abstract placeholder tokens at those locations.
+    """
+    # 1. Ensure no abstract tokens exist yet
+    abstract_mask = (batch_data.levels > 0)
+    assert not abstract_mask.any(), "Cannot add placeholders; abstract tokens already exist."
+    assert level_to_add > 0 and level_to_add < gat.L, f"level_to_add must be between 1 and {gat.L-1}."
+
+    with torch.no_grad():
+        # 2. Get per-token perplexity directly from the GAT model.
+        # Note: gat() needs to return a tensor of shape [total_tokens].
+        ppt = gat(batch_data)
+        
+    # 3. Detect spikes and insert placeholders for each sample
+    new_batch = batch_data.clone()
+    mask_token = gat.level_mask_tokens[level_to_add].item()
+
+    for sample_idx in batch_data.indices:
+        sample_mask_for_ts = (batch_data.sample_idx == sample_idx)
+        sample_timestamps = batch_data.timestamps[sample_mask_for_ts]
+        
+        if len(sample_timestamps) <= 2:
+            continue
+
+        # Isolate the perplexities for the current sample.
+        sample_ppt = ppt[sample_mask_for_ts]
+        
+        # Calculate the increase in perplexity
+        ppt_increase = sample_ppt[1:] - sample_ppt[:-1]
+        
+        # Find locations where the increase exceeds the threshold
+        # We look at ppt_increase[i] which corresponds to the change at sample_timestamps[i+1]
+        spike_indices = (ppt_increase > perplexity_increase_threshold).nonzero(as_tuple=True)[0]
+        
+        if spike_indices.numel() > 0:
+            # We insert the placeholder *before* the token that had the spike.
+            # A spike at `spike_indices[k]` is for the token at `sample_timestamps[spike_indices[k] + 1]`.
+            timestamps_to_add = sample_timestamps[spike_indices + 1]
+            
+            new_batch.insert_tokens(sample_idx, mask_token, level_to_add, timestamps_to_add)
+
+    return new_batch
 
 
 

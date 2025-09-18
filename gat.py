@@ -24,6 +24,7 @@ class GATConfig:
     device: str = "cuda"
     _compile: bool = True
 
+
 class GAT(nn.Module):
 
     def __init__(self, config):
@@ -109,6 +110,7 @@ class GAT(nn.Module):
             batch_data = self._generate(x, batch_data, temperature)
 
         return batch_data
+
 
     def save_checkpoint(self, path: Union[str, Path]):
         torch.save(self.state_dict(), path)
