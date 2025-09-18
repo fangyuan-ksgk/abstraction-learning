@@ -133,6 +133,19 @@ class HierSeq:
             samples.append(sample)
             timestamps.append(timestamp)
         return samples, timestamps
+
+    def clone(self):
+        return HierSeq(
+            tokens=self.tokens.clone(),
+            levels=self.levels.clone(),
+            timestamps=self.timestamps.clone(),
+            sample_idx=self.sample_idx.clone(),
+            batch_size=self.batch_size,
+            K=self.K,
+            L=self.L,
+            device=self.device,
+            idx_map=self.idx_map,
+        )
     
 
     @staticmethod
@@ -356,7 +369,6 @@ class HierSeq:
             combined_groups[level] = (batch_indices, mask_positions, timestamps)
 
         return combined_groups 
-
     
 
     def slice_prefix(self): 
@@ -408,6 +420,74 @@ class HierSeq:
         self.levels = torch.cat(new_level_list)
         self.timestamps = torch.cat(new_timestamp_list)
         self.sample_idx = torch.cat(new_sample_idx_list)
+
+    def filter(self, keep_mask: torch.Tensor):
+        """
+        Returns a NEW HierSeq object containing only the tokens and metadata
+        where keep_mask is True.
+        """
+        # 1. Apply the mask to all tensors
+        new_tokens = self.tokens[keep_mask]
+        new_levels = self.levels[keep_mask]
+        new_timestamps = self.timestamps[keep_mask]
+        new_sample_idx_flat = self.sample_idx[keep_mask]
+
+        # 2. Re-compute the sample indices to be contiguous (e.g., 0, 1, 2...)
+        unique_original_indices = torch.unique(new_sample_idx_flat)
+        new_batch_size = len(unique_original_indices)
+        
+        # Create a mapping from old indices to new indices
+        mapping = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(unique_original_indices)}
+        
+        new_sample_idx = torch.tensor([mapping[old_idx.item()] for old_idx in new_sample_idx_flat], device=self.device)
+
+        return HierSeq(
+            tokens=new_tokens,
+            levels=new_levels,
+            timestamps=new_timestamps,
+            sample_idx=new_sample_idx,
+            batch_size=new_batch_size,
+            K=self.K,
+            L=self.L,
+            device=self.device
+            # Note: idx_map might become invalid after filtering and should be handled carefully
+        )
+
+# util for search
+# ------------------------------------------------------------------------------------------------
+
+def repeat_hseq(batch_data: HierSeq, n_copies: int): 
+
+    original_batch_size = batch_data.batch_size
+
+    replicated_tokens = batch_data.tokens.repeat(n_copies)
+    replicated_levels = batch_data.levels.repeat(n_copies)  
+    replicated_timestamps = batch_data.timestamps.repeat(n_copies)
+
+    tokens_per_sample = torch.bincount(batch_data.sample_idx)[batch_data.indices]  # [num_tokens_sample_0, num_tokens_sample_1, ...]
+    repeats = tokens_per_sample.repeat(n_copies) 
+    new_sample_idx = torch.repeat_interleave(
+        torch.arange(original_batch_size * n_copies, device=batch_data.tokens.device),
+        repeats
+    )
+
+    unique_original_indices = batch_data.indices
+    # unique_original_indices = batch_data.sample_idx.unique(sorted=True)  # Get actual unique sample indices
+    idx_map = unique_original_indices.repeat(n_copies)  # Map each new sample back to its original
+
+    replicated_batch_data = HierSeq(
+        tokens=replicated_tokens,
+        levels=replicated_levels,
+        timestamps=replicated_timestamps,
+        sample_idx=new_sample_idx,
+        batch_size=original_batch_size * n_copies,
+        K=batch_data.K,
+        L=batch_data.L,
+        idx_map=idx_map
+    )
+
+    return replicated_batch_data
+
 
 
 # Search Utility Functions
