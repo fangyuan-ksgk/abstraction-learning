@@ -83,12 +83,21 @@ class CausalSelfAttention(nn.Module):
         # flex attention kernel options
         self.flex_kernel_options = flex_kernel_options
 
-    def forward(self, x, v1=None, block_mask=None):
+    def forward(self, x, v1=None, block_mask=None, cache=None, cache_offset=0):
         B, T = x.size(0), x.size(1)  
         # Compute Q, K, V
         q = self.c_q(x).view(B, T, self.n_head, -1)
         k = self.c_k(x).view(B, T, self.n_head, -1)
-        v = self.c_v(x).view(B, T, self.n_head, -1)        
+        v = self.c_v(x).view(B, T, self.n_head, -1)     
+
+        # Handle KV cache
+        if cache is not None:
+            k_cache, v_cache = cache
+            k = torch.cat([k_cache[:, :cache_offset, :, :], k], dim=1)
+            v = torch.cat([v_cache[:, :cache_offset, :, :], v], dim=1)
+        
+        new_cache = (k, v) # The new cache for this layer
+   
         if v1 is None:
             v1 = v  # If this is the first block, set v1 to v
         v = (1 - self.lamb) * v + self.lamb * v1.view_as(v)  # @Grad62304977
@@ -103,7 +112,7 @@ class CausalSelfAttention(nn.Module):
         )
         y = y.transpose(1, 2).contiguous().view_as(x)       
         y = self.c_proj(y)       
-        return y, v1
+        return y, v1, new_cache
 
 
 class MLP(nn.Module):
@@ -128,12 +137,17 @@ class Block(nn.Module):
         self.mlp = MLP(config.n_embd)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
    
-    def forward(self, x, v1, x0, block_mask):
+    def forward(self, x, v1, x0, block_mask, cache=None, cache_offset=0):
+        # The cache will be a tuple of (k_cache, v_cache)
+        x_norm = norm(x)
+        # Pass the cache to the attention layer
+        x1, v1, new_cache = self.attn(x_norm, v1, block_mask, cache=cache, cache_offset=cache_offset)
+        
         x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x1, v1 = self.attn(norm(x), v1, block_mask)
         x = x + x1
         x = x + self.mlp(norm(x))
-        return x, v1
+
+        return x, v1, new_cache
     
 
 @dataclass
@@ -353,7 +367,6 @@ class GAT(nn.Module):
             entropy[level_mask] = level_entropy
 
         return entropy
-
 
     def _causal_generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 1.0): 
 
