@@ -62,8 +62,6 @@ for gen in range(config.nil_num_generations):
     # (1). Reset / Initialize GAT
     gat = GAT(gat_config)
     gat.to(gat_config.device)
-    if gat.device == "cuda":
-        gat = torch.compile(gat, dynamic=False)
 
     # (2). Weak-supervision (if previous generation exists) 
     if gen > 0: 

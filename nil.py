@@ -117,6 +117,8 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
         if global_step % config.log_interval == 0 and global_step > 0 and wandb_log_prefix:
 
             # Validation needs to be more rigorous : more samples
+            gat.eval()
+
             with torch.no_grad(): 
                 improve_ppl_train = eval_search_improvement(gat, batch_data, t_search=t_search)
                 improve_ppl_val, traj_ppl_val, info_str = evaluate_gat(gat, id_val_dataset, config, t_search, t_max)
@@ -137,6 +139,9 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
                 f"{wandb_log_prefix}/progress/iteration": global_step, 
                 f"{wandb_log_prefix}/progress/t_search": t_search,
             }, step=global_step)
+
+            del val_data
+            gat.train()
 
             if traj_ppl_val > 0.0: 
                 wandb.log({f"{wandb_log_prefix}/val(in-domain)/traj_ppl": traj_ppl_val.mean().item()}, step=global_step)

@@ -217,10 +217,16 @@ class GAT(nn.Module):
         self.num_layers = config.n_layer
         self.L = config.L
         self.K = config.K
-        self.wtes = nn.ModuleList([nn.Embedding(vocab_size, config.n_embd) for vocab_size in config.vocab_size_list])
-        self.lm_heads = nn.ModuleList([CastedLinear(config.n_embd, vocab_size) for vocab_size in config.vocab_size_list])
-        for lm_head in self.lm_heads:
-            lm_head.weight.data.zero_()
+
+        self.vocab_size_list = config.vocab_size_list
+        vocab_offsets = torch.tensor([0] + list(itertools.accumulate(self.vocab_size_list)))[:-1]
+        self.register_buffer('vocab_offsets', vocab_offsets)
+        self.total_vocab_size = sum(self.vocab_size_list)
+
+        self.wtes = nn.Embedding(self.total_vocab_size, config.n_embd)
+        self.lm_heads = CastedLinear(config.n_embd, self.total_vocab_size)
+        
+        self.lm_heads.weight.data.zero_()
         
         self.transformer = nn.ModuleDict(dict(
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
@@ -293,52 +299,39 @@ class GAT(nn.Module):
         self.load_state_dict(torch.load(path, map_location=self.device), strict=strict)
 
     def _create_hseq_embd(self, batch_data: HierSeq, do_slice: bool = True) -> torch.Tensor: 
-
         if do_slice: 
             input_idx, input_levels = batch_data.tokens[:-1], batch_data.levels[:-1]
         else: 
             input_idx, input_levels = batch_data.tokens, batch_data.levels
 
-        S = input_idx.shape[0]
-        # Initialize with zeros and add embeddings in a loop
-        x = torch.zeros(1, S, self.level_embeddings.shape[1], device=self.device)
-
-        for l in range(self.L): # per-level embedding
-            level_mask = (input_levels == l)
-            level_tokens = input_idx[level_mask]
-            
-            # Unconditional embedding calculation
-            level_embed = self.wtes[l](level_tokens) + self.level_embeddings[l].unsqueeze(0)
-            
-            # Use the mask to selectively place the embeddings
-            x = x.masked_scatter_(level_mask.unsqueeze(0).unsqueeze(-1), level_embed.unsqueeze(0))
+        offset_indices = input_idx + self.vocab_offsets[input_levels]
+        
+        x = self.wtes(offset_indices).unsqueeze(0) + self.level_embeddings[input_levels].unsqueeze(0)
 
         return x
 
 
     def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
-
         target_idx, target_levels = batch_data.tokens[1:], batch_data.levels[1:]
         loss_mask = create_loss_mask(batch_data.sample_idx)[1:]
 
-        ppt = torch.zeros_like(target_idx, device=self.device, dtype=torch.float32) # perplexity per token
+        all_logits = self.lm_heads(x)
+        all_logits = 30 * torch.tanh(all_logits / 30).float()
 
-        for l in range(self.L):
-            level_mask = (target_levels == l) & loss_mask
-            
-            # Get the logits for the current level
-            level_logits = self.lm_heads[l](x[:, level_mask])
-            level_logits = 30 * torch.tanh(level_logits / 30).float()
-            
-            # Compute cross-entropy loss
-            level_losses = F.cross_entropy(
-                level_logits.view(-1, level_logits.size(-1)),
-                target_idx[level_mask],
-                reduction="none"
-            )
-            
-            # Use the mask to selectively place the losses
-            ppt = ppt.masked_scatter_(level_mask, level_losses)
+        masked_logits = all_logits[:, loss_mask, :]
+        masked_target_idx = target_idx[loss_mask]
+        masked_target_levels = target_levels[loss_mask]
+
+        offset_target_idx = masked_target_idx + self.vocab_offsets[masked_target_levels]
+
+        all_losses = F.cross_entropy(
+            masked_logits.view(-1, self.total_vocab_size),
+            offset_target_idx,
+            reduction="none"
+        )
+
+        ppt = torch.zeros_like(target_idx, device=self.device, dtype=torch.float32)
+        ppt[loss_mask] = all_losses
 
         return ppt
 
@@ -369,7 +362,7 @@ class GAT(nn.Module):
         for l_next, group in level_groups.items(): 
             batch_indices, masks, timestamps = zip(*group)
             reprs = torch.stack([x[0, mask][-1] for mask in masks])
-            next_tokens = self._decode(self.lm_heads[l_next](reprs), temperature)
+            next_tokens = self._decode(self.lm_heads(reprs), l_next, temperature)
             for i, b in enumerate(batch_indices): 
                 batch_data.insert_tokens(b, next_tokens[i], l_next, timestamps[i])
         
@@ -381,25 +374,30 @@ class GAT(nn.Module):
 
         for l_curr, (batch_indices, mask_positions, timestamps) in level_groups.items(): 
             reprs = x[0, mask_positions] 
-            new_tokens = self._decode(self.lm_heads[l_curr](reprs), temperature)
+            new_tokens = self._decode(self.lm_heads(reprs), l_curr, temperature)
             for i, (b, t) in enumerate(zip(batch_indices, timestamps)): 
-                # print(f" - generate level-{l_curr} token for sample {b} at timestamp {t}")
                 batch_data.insert_tokens(b, new_tokens[i].unsqueeze(0), l_curr, t.unsqueeze(0))
 
         return batch_data
 
-    def _decode(self, logits: torch.Tensor, temperature: float = 0.0, mask_token_id: int = MASK_TOK):
+    def _decode(self, logits: torch.Tensor, level: int, temperature: float = 0.0, mask_token_id: int = MASK_TOK):
+        # Select the relevant slice of logits for the current level
+        start_offset = self.vocab_offsets[level]
+        end_offset = start_offset + self.vocab_size_list[level]
+        level_logits = logits[:, start_offset:end_offset]
 
         if temperature == 0.0:
             if mask_token_id is not None:
-                logits[:, mask_token_id] = float('-inf')
-            return torch.argmax(30 * torch.tanh(logits / 30), dim=-1)
+                # Adjust mask_token_id for the sliced logits if it's within the range
+                if start_offset <= mask_token_id < end_offset:
+                    level_logits[:, mask_token_id - start_offset] = float('-inf')
+            return torch.argmax(30 * torch.tanh(level_logits / 30), dim=-1)
         else: 
-            logits = 30 * torch.tanh(logits / 30)
-            logits = logits.float()
+            level_logits = 30 * torch.tanh(level_logits / 30).float()
             if mask_token_id is not None:
-                logits[:, mask_token_id] = float('-inf')
-            return torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
+                if start_offset <= mask_token_id < end_offset:
+                    level_logits[:, mask_token_id - start_offset] = float('-inf')
+            return torch.multinomial(F.softmax(level_logits / temperature, dim=-1), num_samples=1).squeeze(-1)
 
 
 
