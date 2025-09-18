@@ -237,7 +237,7 @@ def test_compile():
         levels = torch.zeros_like(tokens)
         timestamps = torch.arange(seq_len_per_sample)
         samples.append(
-            ([tokens.tolist()], [timestamps.tolist()])
+            ([tokens.tolist()] + [[] for _ in range(config.L-1)], None)
         )
 
     batch_data = HierSeq.from_hierarchical_data(samples, K=config.K, L=config.L, device=device)
