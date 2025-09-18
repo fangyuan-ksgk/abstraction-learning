@@ -502,6 +502,12 @@ def sorl_search_v2(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_
     return select_batch, switch_ratio, rollout_advantages
 
 
+def sorl_search_v3(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None, switch_abs_ppl_threshold: float = 0.0): 
+    """Dynamic pad (interval-based & perplexity-based) || Self-organizing rollout (model decide when to add abstraction)"""
+    raise NotImplementedError("Not implemented yet")
+
+
+
 # Dynamic threshold adjustment function
 # --------------------------------------------------------------------------------------------------------------------------
 def adjust_threshold(switch_ratio, rollout_advantages, config, ratio_target: float = 0.2): 

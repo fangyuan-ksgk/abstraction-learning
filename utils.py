@@ -297,6 +297,7 @@ class HierSeq:
 
         return level_groups
 
+
     def get_abstract_groups(self): 
         # Collect indices of representation used to predict abstract tokens, timestamp & level of these abstract tokens (for parallel AR generation)
 
@@ -361,6 +362,52 @@ class HierSeq:
     def slice_prefix(self): 
         # Slice the HierSeq so that only prefix is retained
         raise NotImplementedError("Not implemented yet")
+
+    def is_complete(self, max_len: int) -> list:
+        """Checks which samples in the batch have reached max_len."""
+        lengths = torch.bincount(self.sample_idx, minlength=self.batch_size)
+        return (lengths >= max_len).tolist()
+
+    def append_tokens(self, new_tokens: torch.Tensor, new_levels: torch.Tensor):
+        """
+        Appends new tokens and levels to each sample in the batch.
+        This is a simplified helper for auto-regressive generation. It assumes
+        one new token per sample and calculates the new timestamp.
+        """
+        
+        # This is a complex operation on a flattened tensor. A better way is to
+        # deconstruct, append, and reconstruct the HierSeq.
+        # The logic below is a simplified placeholder.
+        
+        # For each sample, find its end and append
+        new_token_list = []
+        new_level_list = []
+        new_timestamp_list = []
+        new_sample_idx_list = []
+
+        for i, sample_idx in enumerate(self.indices):
+            sample_mask = (self.sample_idx == sample_idx)
+            
+            # Append old data
+            new_token_list.append(self.tokens[sample_mask])
+            new_level_list.append(self.levels[sample_mask])
+            new_timestamp_list.append(self.timestamps[sample_mask])
+            new_sample_idx_list.append(self.sample_idx[sample_mask])
+
+            # Append new token
+            new_token_list.append(new_tokens[i].unsqueeze(0))
+            new_level_list.append(new_levels[i].unsqueeze(0))
+            
+            # Determine new timestamp (simple increment for now)
+            new_timestamp = self.timestamps[sample_mask][-1] + 1 if new_levels[i] == 0 else self.timestamps[sample_mask][-1]
+            new_timestamp_list.append(new_timestamp.unsqueeze(0))
+            new_sample_idx_list.append(sample_idx.unsqueeze(0))
+
+        # Reconstruct the tensors
+        self.tokens = torch.cat(new_token_list)
+        self.levels = torch.cat(new_level_list)
+        self.timestamps = torch.cat(new_timestamp_list)
+        self.sample_idx = torch.cat(new_sample_idx_list)
 
 
 # Search Utility Functions
@@ -436,8 +483,8 @@ def compute_hier_seq_len(seq: list, L: int, K: int) -> int:
         total += (seq_len - 1) // (K ** l) + 1
     return total + 1
 
-
-def pad_abstract_tokens(batch_data: HierSeq): 
+# This function now needs the model's `level_mask_tokens` to insert the correct one.
+def pad_abstract_tokens(batch_data: HierSeq, level_mask_tokens: torch.Tensor): 
     abstract_mask = (batch_data.levels > 0)
     assert not abstract_mask.any(), " - Abstract tokens already exist, 'pad_abstract_tokens' requires no abstract tokens"
 
@@ -448,9 +495,10 @@ def pad_abstract_tokens(batch_data: HierSeq):
 
         for l in range(1, batch_data.L): 
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l, device=start_ts.device)
-            batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts[abs_tok_ts >= start_ts])
+            mask_token_for_level = level_mask_tokens[l].item()
+            batch_data.insert_tokens(sample_idx, mask_token_for_level, l, abs_tok_ts[abs_tok_ts >= start_ts])
 
-def extend_abstract_tokens(batch_data: HierSeq, t_extend: int): 
+def extend_abstract_tokens(batch_data: HierSeq, t_extend: int, level_mask_tokens: torch.Tensor): 
     """In-place extension of abstract tokens"""
     abstract_mask = (batch_data.levels > 0)
     assert not abstract_mask.any(), " - Abstract tokens already exist, 'extend_abstract_tokens' requires no abstract tokens"
@@ -463,7 +511,8 @@ def extend_abstract_tokens(batch_data: HierSeq, t_extend: int):
         for l in range(1, batch_data.L): 
             abs_tok_ts = torch.arange(start_ts - 1, end_ts, batch_data.K ** l, device=start_ts.device)
             abs_tok_ts = abs_tok_ts[(abs_tok_ts <= start_ts + t_extend) & (abs_tok_ts >= start_ts)]
-            batch_data.insert_tokens(sample_idx, MASK_TOK, l, abs_tok_ts)
+            mask_token_for_level = level_mask_tokens[l].item()
+            batch_data.insert_tokens(sample_idx, mask_token_for_level, l, abs_tok_ts)
 
 
 

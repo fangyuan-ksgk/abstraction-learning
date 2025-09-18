@@ -117,3 +117,184 @@ def check_model_device(model):
     for name, param in model.named_parameters(): 
         assert param.device.type == model.device, f"parameter {name} not on same device as model"
     print("All parameters matching module device on", model.device)
+
+
+def test_generate():
+
+    from gat import GATConfig, GAT 
+    from utils import HierSeq
+    # 1. Setup a dummy GAT model
+    config = GATConfig(
+        L=3,
+        n_layer=2, # Keep the model small for fast testing
+        n_head=2,
+        n_embd=32,
+        vocab_size_list=[10, 5, 3], # L0, L1, L2
+        device='cpu',
+        _compile=False
+    )
+    model = GAT(config)
+    model.eval() # Set model to evaluation mode
+    level_mask_tokens = model.level_mask_tokens.tolist()
+
+    print("--- 1. Testing Parallel Denoising (_denoise) ---")
+
+    # We expect a level-1 token at ts=2 and a level-2 token at ts=4
+    h_data_denoise = [
+        ([1, 2, 3, 4, 5], [level_mask_tokens[1]], [level_mask_tokens[2]]), # Tokens for L0, L1, L2
+        ([1, 2, 3, 4, 5], [2], [4])  # Timestamps for L0, L1, L2
+    ]
+
+    batch_denoise = HierSeq.from_hierarchical_data(
+        [(h_data_denoise[0], h_data_denoise[1])], K=2, L=3, device='cpu'
+    )
+
+    print("Original sequence with masks:")
+    print(batch_denoise.to_hierarchical_data()[0])
+    assert (batch_denoise.tokens == model.level_mask_tokens[batch_denoise.levels]).sum() == 2
+
+    # Run denoising
+    denoised_batch = model.generate(batch_denoise, parallel=True, temperature=0.0)
+
+    print("\nDenoised sequence:")
+    print(denoised_batch.to_hierarchical_data()[0])
+
+    assert (denoised_batch.tokens == model.level_mask_tokens[denoised_batch.levels]).sum() == 0
+    # Check if the levels of the new tokens are correct
+    assert denoised_batch.levels[denoised_batch.timestamps == 2][-1].item() == 1
+    assert denoised_batch.levels[denoised_batch.timestamps == 4][-1].item() == 2
+    print("✅ Parallel denoising test passed!")
+
+    print("\n--- 2. Testing Auto-regressive Generation (_generate) ---")
+
+    # Create an initial HierSeq to start generation from
+    h_data_generate = [
+        ([1, 2], [], []), # Tokens for L0, L1, L2
+        ([1, 2], [], [])  # Timestamps for L0, L1, L2
+    ]
+    batch_generate = HierSeq.from_hierarchical_data(
+        [(h_data_generate[0], h_data_generate[1])], K=2, L=3, device='cpu'
+    )
+
+    print("Initial sequence for generation:")
+    print(batch_generate.to_hierarchical_data()[0])
+    initial_len = len(batch_generate.tokens)
+
+    # Generate a few tokens
+    num_steps = 3
+    for _ in range(num_steps):
+        batch_generate = model.generate(batch_generate, parallel=False, temperature=0.0)
+
+    print(f"\nSequence after {num_steps} generation steps:")
+    print(batch_generate.to_hierarchical_data()[0])
+
+    # Assertions to verify the logic
+    assert len(batch_generate.tokens) == initial_len + num_steps
+    # Check if the timestamps are sequential
+    assert batch_generate.timestamps[-1].item() > batch_generate.timestamps[-2].item()
+    print("✅ Auto-regressive generation test passed!")
+
+
+
+def test_compile(): 
+    import time
+    from gat import GAT, GATConfig
+    from utils import HierSeq
+    """
+    Benchmarks the forward pass of a GAT model with and without torch.compile.
+    """
+    print("--- Benchmarking torch.compile() ---")
+    
+    # 1. Setup model configurations
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    
+    config = GATConfig(
+        L=3,
+        n_layer=6,
+        n_head=4,
+        n_embd=128,
+        vocab_size_list=[128, 64, 32],
+        device=device,
+        _compile=False  # We will compile manually
+    )
+    
+    # 2. Create two identical models
+    eager_model = GAT(config).to(device)
+    eager_model.eval()
+    
+    # Use dynamic=False for best performance with fixed-shape inputs
+    compiled_model = torch.compile(GAT(config), dynamic=False).to(device)
+    compiled_model.eval()
+
+    # 3. Create a realistic, random batch of data
+    # Let's create a batch with 8 samples, each having around 256 tokens
+    batch_size = 8
+    seq_len_per_sample = 256
+    samples = []
+    for _ in range(batch_size):
+        tokens = torch.randint(0, config.vocab_size_list[0], (seq_len_per_sample,))
+        levels = torch.zeros_like(tokens)
+        timestamps = torch.arange(seq_len_per_sample)
+        samples.append(
+            ([tokens.tolist()], [timestamps.tolist()])
+        )
+
+    batch_data = HierSeq.from_hierarchical_data(samples, K=config.K, L=config.L, device=device)
+    print(f"Batch created with {batch_data.tokens.shape[0]} total tokens.")
+
+    # 4. Define benchmark parameters
+    num_runs = 50
+    warmup_runs = 5
+
+    # --- Benchmarking Eager Model ---
+    print("\nRunning eager model benchmark...")
+    eager_times = []
+    for i in range(num_runs + warmup_runs):
+        start_time = time.time()
+        with torch.no_grad():
+            _ = eager_model(batch_data)
+        
+        # Synchronize for accurate timing on GPU
+        if device == "cuda":
+            torch.cuda.synchronize()
+            
+        end_time = time.time()
+        if i >= warmup_runs:
+            eager_times.append(end_time - start_time)
+
+    eager_total_time = sum(eager_times)
+    eager_avg_time = eager_total_time / num_runs
+    print(f"Eager model: {eager_avg_time * 1000:.2f} ms per run (average of {num_runs} runs)")
+
+    # --- Benchmarking Compiled Model ---
+    print("\nRunning compiled model benchmark...")
+    
+    # Perform a warm-up run for the compiled model
+    print("Performing warm-up run for compilation...")
+    with torch.no_grad():
+        _ = compiled_model(batch_data)
+    if device == "cuda":
+        torch.cuda.synchronize()
+    print("Warm-up complete.")
+
+    compiled_times = []
+    for i in range(num_runs):
+        start_time = time.time()
+        with torch.no_grad():
+            _ = compiled_model(batch_data)
+
+        if device == "cuda":
+            torch.cuda.synchronize()
+            
+        end_time = time.time()
+        compiled_times.append(end_time - start_time)
+
+    compiled_total_time = sum(compiled_times)
+    compiled_avg_time = compiled_total_time / num_runs
+    print(f"Compiled model: {compiled_avg_time * 1000:.2f} ms per run (average of {num_runs} runs)")
+    
+    # --- Results ---
+    speedup = eager_avg_time / compiled_avg_time
+    print("\n--- Results ---")
+    print(f"Speedup factor: {speedup:.2f}x")
