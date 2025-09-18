@@ -453,6 +453,18 @@ class HierSeq:
             # Note: idx_map might become invalid after filtering and should be handled carefully
         )
 
+    def get_last_token_positions(self, do_slice: bool = True) -> torch.Tensor:
+        """
+        Efficiently finds the index of the last token for each sample in the batch.
+        """
+        if do_slice: 
+            sample_idx = self.sample_idx[:-1]
+        else: 
+            sample_idx = self.sample_idx
+        _, last_indices = torch.unique_consecutive(sample_idx, return_inverse=True)
+        last_token_positions = torch.where(last_indices[:-1] != last_indices[1:])[0]
+        return torch.cat([last_token_positions, torch.tensor([len(sample_idx)-1], device=sample_idx.device)])
+
 # util for search
 # ------------------------------------------------------------------------------------------------
 

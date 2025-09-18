@@ -298,3 +298,127 @@ def test_compile():
     speedup = eager_avg_time / compiled_avg_time
     print("\n--- Results ---")
     print(f"Speedup factor: {speedup:.2f}x")
+
+
+def test_drop_traj_tokens():
+    """
+    Tests the drop_traj_tokens function from sorl.py.
+    """
+    from sorl import drop_traj_tokens
+
+    print("\n--- Testing drop_traj_tokens ---")
+    
+    # 1. Setup a dummy batch with mixed levels
+    h_data = [
+        ([0,1,2,3,4,5,6,7,8,9], [10, 11], [12]), # L0, L1, L2 tokens
+        ([0,1,2,3,4,5,6,7,8,9], [4, 8], [0])
+    ]
+    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=4, L=3, device='cpu')
+    
+    # 2. Drop tokens, keeping the last 3 level-0 tokens
+    diminished_batch = drop_traj_tokens(batch, t_keep=3)
+    
+    print("Sequence after dropping all but last 3 trajectory tokens:")
+    data, ts = diminished_batch.to_hierarchical_data()
+    print("Data:", data)
+    print("Timestamps:", ts)
+
+    # Assertions
+    # Check that all abstract tokens are kept
+    assert len(data[0][1]) == 2 and data[0][1] == [10, 11]
+    assert len(data[0][2]) == 1 and data[0][2] == [12]
+    # Check that only the last 3 level-0 tokens are kept
+    assert len(data[0][0]) == 3 and data[0][0] == [7, 8, 9]
+    print("✅ Memory diminishing test passed!")
+
+
+def test_add_rhythmic_placeholders():
+    from gat import GATConfig, GAT
+    from sorl import add_rhythmic_placeholders
+    """
+    Tests the add_rhythmic_placeholders function from sorl.py.
+    """
+    print("\n--- Testing add_rhythmic_placeholders ---")
+    
+    # 1. Setup a dummy model and data
+    config = GATConfig(L=3, K=4, vocab_size_list=[10, 5, 3], device='cpu')
+    model = GAT(config)
+    
+    # Create a simple batch with one sample
+    h_data = [
+        ([1, 2, 3, 4, 5, 6, 7, 8, 9], [], []), # L0 tokens, no abstractions
+        ([1, 2, 3, 4, 5, 6, 7, 8, 9], [], [])
+    ]
+    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=4, L=3, device='cpu')
+    
+    # 2. Test full padding (t_search=None)
+    padded_batch = add_rhythmic_placeholders(batch.clone(), model.level_mask_tokens, t_search=None)
+    
+    print("Padded sequence (full):")
+    _, ts = padded_batch.to_hierarchical_data()
+    print(ts)
+
+    # L1 should have placeholders at ts = 4, 8 (since K=4)
+    # L2 should have placeholders at ts = 16 (but max ts is 9, so none)
+    assert torch.equal(torch.tensor(ts[0][1]), torch.tensor([4, 8]))
+    assert len(ts[0][2]) == 0
+    print("✅ Full padding test passed!")
+
+    # 3. Test partial padding (t_search=5)
+    partial_padded_batch = add_rhythmic_placeholders(batch.clone(), model.level_mask_tokens, t_search=5)
+    
+    print("\nPadded sequence (t_search=5):")
+    _, ts = partial_padded_batch.to_hierarchical_data()
+    print(ts)
+    
+    # L1 should only have a placeholder at ts = 4
+    assert torch.equal(torch.tensor(ts[0][1]), torch.tensor([4]))
+    print("✅ Partial padding test passed!")
+
+
+
+def test_generate_rollout_data():
+    """
+    Tests the consolidated generate_rollout_data function from sorl.py.
+    """
+    from gat import GATConfig, GAT
+    from sorl import generate_rollout_data
+    from search import repeat_hseq # Assuming repeat_hseq is in search.py
+    
+    print("\n--- Testing generate_rollout_data ---")
+    
+    # 1. Setup a dummy model and data
+    config = GATConfig(L=2, K=3, vocab_size_list=[10, 5], device='cpu')
+    model = GAT(config)
+    model.eval()
+
+    h_data = [
+        ([1, 2, 3, 4, 5], []), # L0 tokens, no abstractions
+        ([1, 2, 3, 4, 5], [])
+    ]
+    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=3, L=2, device='cpu')
+
+    # 2. Generate rollouts
+    n_rollouts = 4
+    rollout_batch = generate_rollout_data(model, batch, n=n_rollouts, temperature=0.0)
+
+    # 3. Assertions
+    # Check 1: The batch size should be correct
+    assert rollout_batch.batch_size == n_rollouts, \
+        f"Expected batch size {n_rollouts}, but got {rollout_batch.batch_size}"
+    print("✅ Batch size is correct.")
+
+    # Check 2: There should be no MASK_TOK placeholders left
+    is_mask = (rollout_batch.tokens == model.level_mask_tokens[rollout_batch.levels])
+    assert is_mask.sum() == 0, "MASK_TOK placeholders were not filled."
+    print("✅ All placeholders were denoised.")
+
+    # Check 3: Check if the abstract tokens have been added at the correct timestamps
+    data, ts = rollout_batch.to_hierarchical_data()
+    # For a sequence of length 5 with K=3, L1 tokens should be at ts=3
+    for sample_ts in ts:
+        assert torch.equal(torch.tensor(sample_ts[1]), torch.tensor([3])), \
+            f"Expected L1 tokens at timestamp [3], but got {sample_ts[1]}"
+    print("✅ Abstract tokens were added at the correct rhythmic intervals.")
+    
+    print("✅ `generate_rollout_data` test passed!")
