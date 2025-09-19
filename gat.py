@@ -81,36 +81,48 @@ class GAT(nn.Module):
 
         return self._compute_ppt(x, batch_data)
     
-    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0):
+    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0, kv_cache=None, 
+                 levels: Optional[torch.Tensor] = None):
+        is_causal_pass = kv_cache is not None
 
-        input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
+        if is_causal_pass: # This part needs to be dynamic -- upto first place-holder abstract token, cache is meaningful
+            x = self._create_hseq_embd_for_token(batch_data.tokens[-1], batch_data.levels[-1])
+            cache_offset = batch_data.tokens.shape[0] - 1
+            q_len = 1
+            kv_len = batch_data.tokens.shape[0]
+        else:
+            x = self._create_hseq_embd(batch_data, do_slice=False)
+            cache_offset = 0
+            kv_cache = [None] * self.num_layers
+            q_len = batch_data.tokens.shape[0]
+            kv_len = q_len
 
+        sample_idx = batch_data.sample_idx
+        
         def sample_causal_mask(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
+            q_pos = q_idx + cache_offset
+            causal_mask = q_pos >= kv_idx
+            sample_mask = sample_idx[q_pos] == sample_idx[kv_idx]
             return causal_mask & sample_mask
 
-        S = input_idx.shape[0]
-        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
-
-        x = self._create_hseq_embd(batch_data, do_slice=False)
+        block_mask = create_block_mask(sample_causal_mask, None, None, q_len, kv_len, device=self.device, _compile=self._compile)
 
         x = norm(x)
         x0 = x
         v1 = None
 
         for i in range(self.num_layers):
-            x, v1, _ = self.transformer.h[i](x, v1, x0, block_mask)
+            x, v1, kv_cache[i] = self.transformer.h[i](x, v1, x0, block_mask, cache=kv_cache[i], cache_offset=cache_offset)
 
         x = norm(x)
 
-        if parallel: 
+        if parallel:
             batch_data = self._denoise(x, batch_data, temperature)
+            kv_cache = None # Denoising modifies the sequence, invalidating the cache
         else:
-            batch_data = self._generate(x, batch_data, temperature)
+            batch_data = self._generate(x, batch_data, temperature, levels)
 
-        return batch_data
-
+        return batch_data, kv_cache
 
     def save_checkpoint(self, path: Union[str, Path]):
         torch.save(self.state_dict(), path)
@@ -128,6 +140,11 @@ class GAT(nn.Module):
         
         x = self.wtes(offset_indices).unsqueeze(0) + self.level_embeddings[input_levels].unsqueeze(0)
 
+        return x
+
+    def _create_hseq_embd_for_token(self, token: torch.Tensor, level: torch.Tensor) -> torch.Tensor:
+        offset_index = token + self.vocab_offsets[level]
+        x = self.wtes(offset_index).unsqueeze(0).unsqueeze(0) + self.level_embeddings[level].unsqueeze(0).unsqueeze(0)
         return x
 
     def _compute_ppt(self, x: torch.Tensor, batch_data: HierSeq) -> torch.Tensor: 
@@ -193,7 +210,7 @@ class GAT(nn.Module):
         return level_specific_tokens, next_levels
 
 
-    def _generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 0.0):
+    def _generate(self, x: torch.Tensor, batch_data: HierSeq, temperature: float = 0.0, levels: Optional[torch.Tensor] = None):
         """
         Performs a single auto-regressive generation step.
         The model decides the level of the new token for each sample.
@@ -201,13 +218,17 @@ class GAT(nn.Module):
 
         with torch.no_grad():
 
-            _, last_indices = torch.unique_consecutive(batch_data.sample_idx, return_inverse=True)
-            last_token_positions = torch.where(last_indices[:-1] != last_indices[1:])[0]
-            last_token_positions = torch.cat([last_token_positions, torch.tensor([len(batch_data.sample_idx)-1], device=self.device)])
-            last_hidden_states = x[0, last_token_positions, :]
+            # When generating with a cache, x is the hidden state for the last token of each sample
+            if x.shape[1] == 1:
+                last_hidden_states = x.squeeze(0)
+            else:
+                _, last_indices = torch.unique_consecutive(batch_data.sample_idx, return_inverse=True)
+                last_token_positions = torch.where(last_indices[:-1] != last_indices[1:])[0]
+                last_token_positions = torch.cat([last_token_positions, torch.tensor([len(batch_data.sample_idx)-1], device=self.device)])
+                last_hidden_states = x[0, last_token_positions, :]
 
             logits = self.lm_heads(last_hidden_states)
-            new_tokens, new_levels = self._decode(logits, levels=None, temperature=temperature)
+            new_tokens, new_levels = self._decode(logits, levels=levels, temperature=temperature)
             
             batch_data.append_tokens(new_tokens, new_levels)
 

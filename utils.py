@@ -507,6 +507,92 @@ def repeat_hseq(batch_data: HierSeq, n_copies: int):
 
 
 
+def concatenate_hseq(hseq1, hseq2):
+
+    hseq1.sample_idx = torch.cat([hseq1.sample_idx, hseq2.sample_idx + hseq1.batch_size])
+    hseq1.batch_size = hseq1.batch_size + hseq2.batch_size
+    hseq1.idx_map = torch.cat([hseq1.idx_map, hseq2.idx_map])
+
+    hseq1.tokens = torch.cat([hseq1.tokens, hseq2.tokens])
+    hseq1.levels = torch.cat([hseq1.levels, hseq2.levels])
+    hseq1.timestamps = torch.cat([hseq1.timestamps, hseq2.timestamps])
+
+    return hseq1
+
+
+def compute_switch_abstraction_ratio(repeat_batch: HierSeq, argmax_indices: torch.Tensor, rollout_advantages: torch.Tensor): 
+    n_unique_indices = torch.unique(repeat_batch.idx_map).size(0)
+    n_switch_abstraction = (argmax_indices >= n_unique_indices).sum().item()
+    ratio = n_switch_abstraction / n_unique_indices
+    return ratio
+
+
+def compute_weak_group_argmax_mask(means: torch.Tensor, orig_idx: torch.Tensor, indices: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
+    weak_argmax_mask = torch.zeros(len(orig_idx), dtype=torch.bool)
+    rollout_advantages = torch.zeros(len(orig_idx), device=orig_idx.device)
+
+    for idx in orig_idx:
+        sample_mask = (orig_idx == idx)
+        assert (indices[sample_mask] == indices[sample_mask].sort().values).all(), "First group is NOT the first appearance"
+        
+        # Pick the best rollout that satisfies the threshold condition
+        rollout_ppl = means[sample_mask]
+        greedy_ppl = rollout_ppl[0]
+        rollout_advantages[sample_mask] = greedy_ppl - rollout_ppl
+
+        mask = (rollout_ppl <= greedy_ppl - switch_abs_ppl_threshold)
+        mask[0] = True
+
+        effective_ppl = torch.where(mask, rollout_ppl, torch.tensor(float('inf')))
+        abs_idx = torch.argmin(effective_ppl)
+        abs_idx = torch.where(sample_mask)[0][abs_idx]
+
+        weak_argmax_mask[abs_idx] = True
+        
+    return weak_argmax_mask, rollout_advantages
+
+
+def compute_grouped_weak_argmax(values: torch.Tensor, indices: torch.Tensor, idx_map: torch.Tensor, switch_abs_ppl_threshold: float = 0.1): 
+
+    # per-current-group mean (current indices)
+    unique_indices, inverse = torch.unique(indices, return_inverse=True)
+    n = len(unique_indices)
+    means = torch.zeros(n, device=values.device).scatter_add_(0, inverse, values) / torch.bincount(inverse).float()
+
+    # per-original-group argmax 
+    orig_idx = idx_map[unique_indices]
+    max_mask, rollout_advantages = compute_weak_group_argmax_mask(means, orig_idx, unique_indices, switch_abs_ppl_threshold)
+    argmax_indices = unique_indices[max_mask]
+
+    # returned indices are in current indices space
+    return argmax_indices, rollout_advantages[max_mask]
+
+def select_hseq(repeat_batch: HierSeq, select_mask: torch.Tensor): 
+    batch_size = repeat_batch.batch_size
+
+    selected_tokens = repeat_batch.tokens[select_mask]
+    selected_levels = repeat_batch.levels[select_mask]
+    selected_timestamps = repeat_batch.timestamps[select_mask]
+
+    selected_sample_idx = repeat_batch.idx_map[repeat_batch.sample_idx[select_mask]]
+
+    indices = get_unique_ordered(selected_sample_idx)
+    assert batch_size % len(indices) == 0, f"Batch Size {batch_size} must be divisible by the number of selected samples {len(indices)}"
+
+    selected_batch_size = len(indices)
+
+    selected_batch_data = HierSeq(
+        tokens=selected_tokens,
+        levels=selected_levels,
+        timestamps=selected_timestamps,
+        sample_idx=selected_sample_idx,
+        batch_size=selected_batch_size,
+        K=repeat_batch.K,
+        L=repeat_batch.L
+    )
+    return selected_batch_data
+
+
 # Search Utility Functions
 # --------------------------------------------------------------------------------------------------------------------------
 # Caveat: using 0-th level token perplexity to infer 'prefix abstract token' timestamp is an ambiguous task. 
@@ -687,6 +773,20 @@ def slice_query_hseq(batch_data: HierSeq, answer_token_id: int):
     batch_data.timestamps = batch_data.timestamps[query_mask]
     batch_data.sample_idx = batch_data.sample_idx[query_mask]
 
+def slice_hseq(batch_data: HierSeq, mask: torch.Tensor):
+
+    hseq = HierSeq(
+        tokens=batch_data.tokens[mask],
+        levels=batch_data.levels[mask],
+        timestamps=batch_data.timestamps[mask],
+        sample_idx=batch_data.sample_idx[mask],
+        batch_size=batch_data.batch_size,
+        K=batch_data.K,
+        L=batch_data.L,
+        device=batch_data.device
+    )
+
+    return hseq
 
 def append_hseq(query_hseq: HierSeq, hseq: HierSeq): 
     """Add missing timestamps to query HierSeq, using hseq | assumption is hseq is complete, and query_hseq misses token from a certain timestamp for each sample"""

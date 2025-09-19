@@ -376,54 +376,6 @@ def test_add_rhythmic_placeholders():
     print("✅ Partial padding test passed!")
 
 
-
-def test_generate_rollout_data():
-    """
-    Tests the consolidated generate_rollout_data function from sorl.py.
-    """
-    from gat import GATConfig, GAT
-    from sorl import generate_rollout_data
-    from utils import repeat_hseq # Assuming repeat_hseq is in utils.py
-    
-    print("\n--- Testing generate_rollout_data ---")
-    
-    # 1. Setup a dummy model and data
-    config = GATConfig(L=2, K=3, vocab_size_list=[10, 5], device='cpu')
-    model = GAT(config)
-    model.eval()
-
-    h_data = [
-        ([1, 2, 3, 4, 5], []), # L0 tokens, no abstractions
-        ([1, 2, 3, 4, 5], [])
-    ]
-    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=3, L=2, device='cpu')
-
-    # 2. Generate rollouts
-    n_rollouts = 4
-    rollout_batch = generate_rollout_data(model, batch, n=n_rollouts, temperature=0.0)
-
-    # 3. Assertions
-    # Check 1: The batch size should be correct
-    assert rollout_batch.batch_size == n_rollouts, \
-        f"Expected batch size {n_rollouts}, but got {rollout_batch.batch_size}"
-    print("✅ Batch size is correct.")
-
-    # Check 2: There should be no MASK_TOK placeholders left
-    is_mask = (rollout_batch.tokens == model.level_mask_tokens[rollout_batch.levels])
-    assert is_mask.sum() == 0, "MASK_TOK placeholders were not filled."
-    print("✅ All placeholders were denoised.")
-
-    # Check 3: Check if the abstract tokens have been added at the correct timestamps
-    data, ts = rollout_batch.to_hierarchical_data()
-    # For a sequence of length 5 with K=3, L1 tokens should be at ts=3
-    for sample_ts in ts:
-        assert torch.equal(torch.tensor(sample_ts[1]), torch.tensor([3])), \
-            f"Expected L1 tokens at timestamp [3], but got {sample_ts[1]}"
-    print("✅ Abstract tokens were added at the correct rhythmic intervals.")
-    
-    print("✅ `generate_rollout_data` test passed!")
-
-
 def test_add_spike_placeholders():
     """
     Tests the add_spike_placeholders function from sorl.py, which uses
@@ -501,3 +453,154 @@ def test_add_spike_placeholders():
     
     # Restore original method
     model.forward = original_forward
+
+
+def test_generate_rollout_data():
+    """
+    Tests the consolidated generate_rollout_data function from sorl.py.
+    """
+    from gat import GATConfig, GAT
+    from sorl import generate_rollout_data
+    from utils import repeat_hseq # Assuming repeat_hseq is in utils.py
+    
+    print("\n--- Testing generate_rollout_data ---")
+    
+    # 1. Setup a dummy model and data
+    config = GATConfig(L=2, K=3, vocab_size_list=[10, 5], device='cpu')
+    model = GAT(config)
+    model.eval()
+
+    h_data = [
+        ([1, 2, 3, 4, 5], []), # L0 tokens, no abstractions
+        ([1, 2, 3, 4, 5], [])
+    ]
+    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=3, L=2, device='cpu')
+
+    # 2. Generate rollouts
+    n_rollouts = 4
+    rollout_batch = generate_rollout_data(model, batch, n=n_rollouts, temperature=0.0)
+
+    # 3. Assertions
+    # Check 1: The batch size should be correct
+    assert rollout_batch.batch_size == n_rollouts, \
+        f"Expected batch size {n_rollouts}, but got {rollout_batch.batch_size}"
+    print("✅ Batch size is correct.")
+
+    # Check 2: There should be no MASK_TOK placeholders left
+    is_mask = (rollout_batch.tokens == model.level_mask_tokens[rollout_batch.levels])
+    assert is_mask.sum() == 0, "MASK_TOK placeholders were not filled."
+    print("✅ All placeholders were denoised.")
+
+    # Check 3: Check if the abstract tokens have been added at the correct timestamps
+    data, ts = rollout_batch.to_hierarchical_data()
+    # For a sequence of length 5 with K=3, L1 tokens should be at ts=3
+    for sample_ts in ts:
+        assert torch.equal(torch.tensor(sample_ts[1]), torch.tensor([3])), \
+            f"Expected L1 tokens at timestamp [3], but got {sample_ts[1]}"
+    print("✅ Abstract tokens were added at the correct rhythmic intervals.")
+    
+    print("✅ `generate_rollout_data` test passed!")
+
+
+def test_select_best_abstraction():
+    """
+    Tests the select_best_abstraction function from sorl.py.
+    """
+    from sorl import select_best_abstraction
+    from utils import HierSeq
+
+    print("\n--- Testing select_best_abstraction ---")
+
+    # 1. Setup: 2 original samples, 2 rollouts each. Total batch size = 4.
+    # Rollout from idx 1 should be best for sample 0.
+    # Rollout from idx 2 should be best for sample 1.
+    samples = []
+    for _ in range(4):
+        # Each sample has 5 level-0 tokens, ts 1-5
+        data = [list(range(5)), []] # L0, L1 data
+        ts = [list(range(1, 6)), []] # L0, L1 timestamps
+        samples.append((data, ts))
+
+    repeat_batch = HierSeq.from_hierarchical_data(samples, K=4, L=2, device='cpu')
+    repeat_batch.idx_map = torch.tensor([0, 0, 1, 1])
+
+    # 2. Craft a PPT tensor. The function averages ppl for level-0 tokens at ts > 1.
+    # Total tokens = 4 samples * 5 tokens = 20. PPT length = 19.
+    ppt = torch.ones(19, dtype=torch.float32) * 5.0
+
+    # For idx 1 (best for sample 0), make its traj ppl low.
+    # Trajectory tokens for sample 1 are tokens 6-9, predicted by ppt[5-8]
+    ppt[5:9] = 1.0
+
+    # For idx 2 (best for sample 1), make its traj ppl low.
+    # Trajectory tokens for sample 2 are tokens 11-14, predicted by ppt[10-13]
+    ppt[10:14] = 2.0
+
+    # 3. Execute
+    select_batch, _, _ = select_best_abstraction(repeat_batch, ppt, duplicate=False)
+
+    # 4. Assert
+    expected_indices = torch.tensor([1, 2])
+    assert torch.equal(select_batch.indices.sort().values, expected_indices.sort().values), \
+        f"Expected selected indices {expected_indices}, but got {select_batch.indices}"
+    print("✅ `select_best_abstraction` test passed!")
+
+
+def test_sorl_search():
+    """
+    Tests the main sorl_search function from sorl.py.
+    """
+    from sorl import sorl_search
+    from gat import GAT, GATConfig
+    from utils import HierSeq
+    from unittest.mock import patch
+
+    print("\n--- Testing sorl_search ---")
+
+    # 1. Setup
+    config = GATConfig(L=2, K=3, vocab_size_list=[10, 5], device='cpu')
+    model = GAT(config)
+    model.eval()
+    batch = HierSeq.from_hierarchical_data([([ [1, 2], [] ], [ [1, 2], [] ])], K=3, L=2, device='cpu')
+
+    # 2. Mocking generate_rollout_data and gat.forward
+    # R0 = ref, R1, R2 = exploration. R2 will be made the best.
+    ref_batch = HierSeq.from_hierarchical_data([([ [1, 2, 3], [] ], [ [1, 2, 3], [] ])], K=3, L=2, device='cpu')
+    explore_batch = HierSeq.from_hierarchical_data(
+        [
+            ([ [1, 2, 4], [] ], [ [1, 2, 3], [] ]), # R1
+            ([ [1, 2, 5], [] ], [ [1, 2, 3], [] ])  # R2 -> best
+        ], K=3, L=2, device='cpu'
+    )
+    
+    # Mock ppt. Total tokens = 3 (R0) + 3 (R1) + 3 (R2) = 9. PPT length = 8.
+    # The selection function only looks at traj tokens (ts > 1), so 2 per sample.
+    # We only need to mock the full ppt; the function will apply the mask.
+    mock_ppt = torch.tensor([
+        5.0, 5.0,  # R0 preds for t_1, t_2
+        5.0, 5.0,  # R1 preds for t_1, t_2
+        1.0, 1.0,  # R2 preds for t_1, t_2 -> best
+        0.0, 0.0   # Dummy values to make length 8
+    ], dtype=torch.float)
+    
+    mock_generate = patch('sorl.generate_rollout_data').start()
+    mock_generate.side_effect = [ref_batch, explore_batch]
+    
+    original_forward = model.forward
+    model.forward = lambda b: mock_ppt
+
+    # 3. Execute
+    select_batch, _, _ = sorl_search(model, batch, n=3, temperature=1.0)
+
+    # 4. Assertions
+    assert select_batch.batch_size == 1
+    expected_tokens = torch.tensor([1, 2, 5])
+    assert torch.equal(select_batch.tokens, expected_tokens), \
+        f"Expected selected tokens {expected_tokens}, but got {select_batch.tokens}"
+    print("✅ `sorl_search` test passed!")
+
+    # 5. Cleanup
+    patch.stopall()
+    model.forward = original_forward
+
+

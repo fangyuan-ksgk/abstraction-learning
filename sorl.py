@@ -9,12 +9,13 @@
 # What's the minimal # of function that can implement above approaches?
 
 import torch
-from utils import HierSeq, repeat_hseq
+from utils import HierSeq, repeat_hseq, compute_grouped_weak_argmax, select_hseq, compute_switch_abstraction_ratio, concatenate_hseq
 from typing import Optional, List
 from gat import GAT
 from torch.distributions import Categorical
 from collections import deque
 import torch.nn.functional as F
+from math import ceil
 
 
 # ------------------------------------------------------------------------------------------------
@@ -30,8 +31,6 @@ def add_rhythmic_placeholders(batch_data: HierSeq, level_mask_tokens: torch.Tens
     If `t_search` is provided, it only adds placeholders up to that timestamp.
     Otherwise, it pads the entire sequence.
     """
-    abstract_mask = (batch_data.levels > 0)
-    assert not abstract_mask.any(), "Cannot add placeholders; abstract tokens already exist."
 
     for sample_idx in batch_data.indices: 
         sample_mask = (batch_data.sample_idx == sample_idx)
@@ -51,16 +50,11 @@ def add_rhythmic_placeholders(batch_data: HierSeq, level_mask_tokens: torch.Tens
             
             if abs_tok_ts_to_add.numel() > 0:
                 mask_token_for_level = level_mask_tokens[l].item()
-                batch_data.insert_tokens(sample_idx, mask_token_for_level, l, abs_tok_ts_to_add)
+                batch_data.insert_tokens(sample_idx, mask_token_for_level, l, abs_tok_ts_to_add, overwrite=False)
     
     return batch_data
 
 
-# This is still off: 
-# - our goal, is to allow 'multiple abstract tokens' at the same timestamp / position, this is akin to CoT on confusion spot
-# - currently, we are only adding one abstract token at a time, order base one-by-one addition is missing the point
-# - what we need is more similar to an importance weight, weight proportional to 'ppl_increase'
-# - we want to sample deterministically, based on their weight, allocate abstract token counts
 def allocate_budget(spike_weights, abstract_budget):
     normalized_weights = spike_weights / spike_weights.sum()
     ideal_counts = normalized_weights * abstract_budget
@@ -127,14 +121,6 @@ def add_spike_placeholders(
     return batch_data
 
 
-# (TBD). A combination of two functions: 
-# - fixed rhythmic placeholder + adaptive spike placeholder
-def add_combined_placeholders(batch_data: HierSeq, gat: GAT, abstract_budgets: torch.Tensor, t_search: Optional[int] = None): 
-    batch_data = add_rhythmic_placeholders(batch_data, gat.level_mask_tokens, t_search)
-    batch_data = add_spike_placeholders(gat, batch_data, abstract_budgets)
-    return batch_data
-
-
 def drop_traj_tokens(batch_data: HierSeq, t_keep: int): 
     """
     Keeps all abstract tokens but drops level-0 tokens, only keeping the
@@ -157,36 +143,175 @@ def drop_traj_tokens(batch_data: HierSeq, t_keep: int):
     return batch_data.filter(keep_mask)
 
 
-# Rollout generation || 
+def pad_abstract_tokens(batch_data: HierSeq, 
+                        gat: GAT,
+                        t_search: Optional[int] = None,
+                        use_spike_placeholders: bool = False,
+                        abstract_budgets: Optional[torch.Tensor] = None,
+                        use_rhythmic_placeholders: bool = False,
+                        use_diminish_memory: bool = False,
+                        t_keep: int = 0):
+    """
+    Add placeholder abstraction tokens to HierSeq 
+    """
+
+    if use_spike_placeholders:
+        assert abstract_budgets is not None, "abstract_budgets must be provided for spike placeholders"
+    if use_diminish_memory:
+        assert t_keep > 0, "t_keep must be > 0 for diminish memory"
+
+    # 1. Optionally add spike-based placeholders
+    if use_spike_placeholders:
+        batch_data = add_spike_placeholders(gat, batch_data, abstract_budgets)
+
+    # 2. Optionally add rhythmic placeholders
+    if use_rhythmic_placeholders:
+        batch_data = add_rhythmic_placeholders(batch_data, gat.level_mask_tokens, t_search)
+
+    # 3. Optionally diminish memory by dropping old trajectory tokens
+    if use_diminish_memory:
+        batch_data = drop_traj_tokens(batch_data, t_keep)
+
+    return batch_data
+
+
+def repad_abstract_tokens(batch_data: HierSeq, keep_ratio: float, level_mask_tokens: torch.Tensor):
+    """
+    For each sample, keeps the first `keep_prefix_n` abstract tokens and
+    replaces the rest with their corresponding MASK placeholder tokens.
+    """
+    n_replace = 0 
+
+    for sample_idx in batch_data.indices:
+
+        sample_abstract_mask = (batch_data.sample_idx == sample_idx.item()) & (batch_data.levels > 0)
+        abstract_indices = sample_abstract_mask.nonzero(as_tuple=True)[0]
+        keep_n = ceil(len(abstract_indices) * keep_ratio)
+        
+        if len(abstract_indices) > keep_n:
+            indices_to_replace = abstract_indices[keep_n:]
+            levels_to_replace = batch_data.levels[indices_to_replace]
+            mask_tokens_to_insert = level_mask_tokens.to(batch_data.device)[levels_to_replace]
+            batch_data.tokens[indices_to_replace] = mask_tokens_to_insert
+            n_replace += len(indices_to_replace) 
+
+    return batch_data, n_replace
+
+
+# Generate chunk by chunk, parallel within chunk (KV cache to be added)
+# (TBD). Include KV-cache inside. 
+# --------------------------------------------------------------------------------------------------------------------
+def chunk_generate(model: GAT, batch: HierSeq, n_step: int, temperature: float = 0.0):
+
+    model.generate(batch, parallel=True, temperature=temperature)
+
+    ratio_schedule = torch.linspace(0.0, 1.0, n_step+1)[1:-1]
+    for ratio in ratio_schedule: 
+        batch, n_replace = repad_abstract_tokens(batch, ratio.item(), model.level_mask_tokens)
+        if n_replace == 0: 
+            break 
+        model.generate(batch, parallel=True, temperature=0.0)
+
+    return batch
+
+
+# ------------------------------------------------------------------------------------------------
+# Causal Abstraction Generation (one-by-one) is the only way to leverage proper attention to previous abstractions
+# - tricks like rhythmic abstraction generation can be easily integraed into causal generation
+# - ideally the spike-based abstraction addition can also be integrated into causal generation
+# - that way we unify "inference / evaluation" with "rollout generation"
+# - it's just quite complicated to integrate causal generation .... 
+# - is there an easier way of doing this? how about segment-wise parallel generation?
+# - or, better yet, how about just denoising style iterative refinement? 
+# - The simplest way: 
 # ------------------------------------------------------------------------------------------------
 
-# This, more specificlly, is generate in 'parallel denoised' mode, with 'rhythmic placeholder' abstraction tokens
 
-def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None): 
- 
-    # repeat
+
+# Rollout generation || Combining above functionalities
+# ------------------------------------------------------------------------------------------------
+
+def generate_rollout_data(
+    gat: GAT,
+    batch_data: HierSeq,
+    n: int,
+    temperature: float,
+    t_search: Optional[int] = None,
+    use_spike_placeholders: bool = False,
+    abstract_budgets: Optional[torch.Tensor] = None,
+    use_rhythmic_placeholders: bool = False,
+    use_diminish_memory: bool = False,
+    t_keep: int = 0,
+    chunk_generate_step: int = 1,
+    ):
+    """
+    Generates rollout data by repeating a batch, optionally applying SoRL
+    techniques, and then denoising to generate the final trajectories.
+    The order of application is: diminish memory, spike placeholders, rhythmic placeholders.
+    """
     repeat_batch = repeat_hseq(batch_data, n)
 
-    # add placeholders
-    repeat_batch = add_rhythmic_placeholders(repeat_batch, gat.level_mask_tokens, t_search)
+    repeat_batch = pad_abstract_tokens(repeat_batch, 
+                                       gat, 
+                                       t_search, 
+                                       use_spike_placeholders, 
+                                       abstract_budgets, 
+                                       use_rhythmic_placeholders, 
+                                       use_diminish_memory, 
+                                       t_keep)
 
-    # generate rollout 
-    repeat_batch = gat.generate(repeat_batch, parallel=True, temperature=temperature)
+    rollout_batch = chunk_generate(gat, repeat_batch, chunk_generate_step, temperature)
 
-    return repeat_batch
-
-
-# Abstract allocation based on perplexity spikes
-# ------------------------------------------------------------------------------------------------
-# - abstraction, like CoT is used to multi-hop, with the goal of reducing perplexity
-# - spikes detectio is more natural as it doesn't break segment with 'consecutive decreasing perplexity'. 
-# - this is analogous to our token growth work, which verifies the effectiveness of this spike detection based approach
-# - for memory fading, this is also more suitable, as then it's like we are using a 'longer token' to replace things
+    return rollout_batch
 
 
+# Sitch together temp=0.0 sampled HierSeq with temp>0.0 sampled HierSeq
+# --------------------------------------------------------------------------------------------------------------------------
+
+# (To be checked)
+def select_best_abstraction(repeat_batch: HierSeq, ppt: torch.Tensor, duplicate: bool = True, switch_abs_ppl_threshold: float = 0.0) -> tuple[HierSeq, float]: 
+    """Pick best abstraction for each sample & repeat to original length || prioritize first occurance of max values when equal"""
+
+    traj_mask = (repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
+    traj_idx = repeat_batch.sample_idx[1:][traj_mask]
+    traj_ppl = ppt[traj_mask]
+
+    argmax_indices, rollout_advantages = compute_grouped_weak_argmax(traj_ppl, traj_idx, repeat_batch.idx_map, switch_abs_ppl_threshold)
+
+    switch_ratio = compute_switch_abstraction_ratio(repeat_batch, argmax_indices, rollout_advantages) # to be removed
+
+    select_mask = torch.isin(repeat_batch.sample_idx, argmax_indices)
+    select_batch = select_hseq(repeat_batch, select_mask)
+    if duplicate: 
+        select_batch = repeat_hseq(select_batch, repeat_batch.batch_size // select_batch.batch_size)
+
+    return select_batch, switch_ratio, rollout_advantages # (TBD. remove switch_ratio, rollout_advantages, theses are for logging purpose only)
+
+# (To be checked)
+def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_search: Optional[int] = None,
+                use_spike_placeholders: bool = False,
+                abstract_budgets: Optional[torch.Tensor] = None,
+                use_rhythmic_placeholders: bool = False,
+                use_diminish_memory: bool = False,
+                t_keep: int = 0,
+    ): 
+
+    """Explore, Evaluate, Select || Pinned greedy sample ver."""
     
+    if t_search is not None and t_search == 0: 
+        return repeat_hseq(batch_data, n), 0.0, torch.tensor([0.0])
 
+    # explore
+    assert n > 1, "n must be greater than 1"
+    ref_batch = generate_rollout_data(gat, batch_data, 1, 0.0, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep)
+    explore_batch = generate_rollout_data(gat, batch_data, n-1, temperature, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep)
 
+    ref_batch = concatenate_hseq(ref_batch, explore_batch)
 
+    # evaluate 
+    ppt = gat(ref_batch)
 
+    # select | include threshold for weak-argmax selection that retains greedy sample (for stability)
+    select_batch, switch_ratio, rollout_advantages = select_best_abstraction(ref_batch, ppt)
 
+    return select_batch, switch_ratio, rollout_advantages
