@@ -215,7 +215,7 @@ class HierSeq:
     def __len__(self):
         return self.batch_size
 
-    def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int]): 
+    def insert_tokens(self, sample_idx: int, tokens: Union[torch.Tensor, int], level: int, timestamps: Union[torch.Tensor, int], overwrite: bool = True): 
         """Insert multiple tokens for a specific sample at positions determined by timestamps."""
         
         if not torch.is_tensor(tokens):
@@ -245,10 +245,14 @@ class HierSeq:
         sample_levels = self.levels[sample_mask]
         
         for token, timestamp in zip(tokens, timestamps):
-            insert_after_mask = torch.logical_or(
-                sample_timestamps < timestamp,
-                torch.logical_and(sample_timestamps == timestamp, sample_levels < level)
-            )
+
+            if overwrite: 
+                insert_after_mask = torch.logical_or(
+                    sample_timestamps < timestamp,
+                    torch.logical_and(sample_timestamps == timestamp, sample_levels < level)
+                )
+            else: 
+                insert_after_mask = (sample_timestamps <= timestamp)
             
             if insert_after_mask.any():
                 last_valid_pos = sample_positions[insert_after_mask][-1].item()
@@ -260,6 +264,7 @@ class HierSeq:
                 sample_timestamps > timestamp,
                 torch.logical_and(sample_timestamps == timestamp, sample_levels > level)
             )
+                
             if suffix_mask.any():
                 suffix_pos = sample_positions[suffix_mask][0].item()
             else:

@@ -16,7 +16,13 @@ from torch.distributions import Categorical
 from collections import deque
 import torch.nn.functional as F
 
-# (Your other sorl.py functions like add_rhythmic_placeholders can remain for other experiments)
+
+# ------------------------------------------------------------------------------------------------
+# Placeholder enables parallel generation of abstraction, speeds up search significantly
+# Two mode of placeholder addition: 
+# - rhythmic placeholder: fixed interval addition (external)
+# - spike placeholder: adaptive addition based on perplexity spikes (internal)
+# ------------------------------------------------------------------------------------------------
 
 def add_rhythmic_placeholders(batch_data: HierSeq, level_mask_tokens: torch.Tensor, t_search: Optional[int] = None): 
     """
@@ -48,6 +54,86 @@ def add_rhythmic_placeholders(batch_data: HierSeq, level_mask_tokens: torch.Tens
                 batch_data.insert_tokens(sample_idx, mask_token_for_level, l, abs_tok_ts_to_add)
     
     return batch_data
+
+
+# This is still off: 
+# - our goal, is to allow 'multiple abstract tokens' at the same timestamp / position, this is akin to CoT on confusion spot
+# - currently, we are only adding one abstract token at a time, order base one-by-one addition is missing the point
+# - what we need is more similar to an importance weight, weight proportional to 'ppl_increase'
+# - we want to sample deterministically, based on their weight, allocate abstract token counts
+def allocate_budget(spike_weights, abstract_budget):
+    normalized_weights = spike_weights / spike_weights.sum()
+    ideal_counts = normalized_weights * abstract_budget
+    token_counts = torch.floor(ideal_counts).long()
+    remainder = abstract_budget - token_counts.sum()
+
+    if remainder > 0:
+        residuals = ideal_counts - token_counts
+        _, top_indices = torch.topk(residuals, int(remainder))
+        token_counts[top_indices] += 1
+
+    return token_counts 
+
+
+def add_spike_placeholders(
+    gat: GAT,
+    batch_data: HierSeq,
+    abstract_budgets: torch.Tensor,
+):
+    """
+    Analyzes a batch, identifies perplexity spikes (a decrease followed by an
+    increase), and inserts a fixed budget of abstract placeholder tokens at the
+    locations with the highest perplexity increase.
+    """
+    abstract_mask = (batch_data.levels > 0)
+    assert not abstract_mask.any(), "Cannot add placeholders; abstract tokens already exist."
+
+    with torch.no_grad():
+        ppt = gat(batch_data)
+
+    ppt_increase = ppt[1:] - ppt[:-1]
+    
+    for add_level in range(1, batch_data.L):
+        abstract_budget = abstract_budgets[add_level]
+        if abstract_budget == 0:
+            continue
+
+        # increase in perplexity within same sample
+        spike_mask = ppt_increase > 0
+        same_sample_mask = (batch_data.sample_idx[1:-1] == batch_data.sample_idx[2:])
+        spike_mask &= same_sample_mask
+
+        spike_indices = torch.where(spike_mask)[0]
+        if spike_indices.numel() == 0:
+            continue
+            
+        spike_weights = ppt_increase[spike_mask]
+        token_counts = allocate_budget(spike_weights, abstract_budget)
+
+        non_zero_mask = token_counts > 0
+        final_counts = token_counts[non_zero_mask]
+        final_indices = spike_indices[non_zero_mask]
+
+        if final_counts.numel() == 0:
+            continue
+
+        add_timestamps = torch.repeat_interleave(batch_data.timestamps[final_indices + 1], final_counts)
+        add_sample_idx = torch.repeat_interleave(batch_data.sample_idx[final_indices + 1], final_counts)
+        mask_token = gat.level_mask_tokens[add_level]
+
+        for idx, ts in zip(add_sample_idx, add_timestamps):
+            batch_data.insert_tokens(idx, mask_token, add_level, ts, overwrite=False)
+
+    return batch_data
+
+
+# (TBD). A combination of two functions: 
+# - fixed rhythmic placeholder + adaptive spike placeholder
+def add_combined_placeholders(batch_data: HierSeq, gat: GAT, abstract_budgets: torch.Tensor, t_search: Optional[int] = None): 
+    batch_data = add_rhythmic_placeholders(batch_data, gat.level_mask_tokens, t_search)
+    batch_data = add_spike_placeholders(gat, batch_data, abstract_budgets)
+    return batch_data
+
 
 def drop_traj_tokens(batch_data: HierSeq, t_keep: int): 
     """
@@ -97,71 +183,8 @@ def generate_rollout_data(gat: GAT, batch_data: HierSeq, n: int, temperature: fl
 # - this is analogous to our token growth work, which verifies the effectiveness of this spike detection based approach
 # - for memory fading, this is also more suitable, as then it's like we are using a 'longer token' to replace things
 
-def add_placeholders_at_spikes(
-    gat: GAT,
-    batch_data: HierSeq,
-    abstract_budgets: torch.Tensor,
-):
-    """
-    Analyzes a batch, identifies perplexity spikes (a decrease followed by an
-    increase), and inserts a fixed budget of abstract placeholder tokens at the
-    locations with the highest perplexity increase.
-    """
-    abstract_mask = (batch_data.levels > 0)
-    assert not abstract_mask.any(), "Cannot add placeholders; abstract tokens already exist."
 
-    with torch.no_grad():
-        # This assumes gat(batch) returns per-token perplexity (or loss)
-        # of shape [total_tokens]
-        ppt = gat(batch_data)
-
-    ppt_increase = ppt[1:] - ppt[:-1]
     
-    # This function modifies batch_data in-place, which is different from
-    # previous versions that returned a new_batch. We'll stick to the
-    # logic from your notes.
-    for add_level in range(1, batch_data.L):
-        abstract_budget = abstract_budgets[add_level]
-        if abstract_budget == 0:
-            continue
-
-        # A spike is a dip (or flat) followed by a rise.
-        # drop_before_mask[i] is true if ppt_increase[i-1] was <= 0
-        drop_before_mask = torch.cat([
-            torch.tensor([False], device=ppt.device), 
-            ppt_increase[:-1] <= 0
-        ])
-        increase_mask = ppt_increase > 0
-        spike_mask = drop_before_mask & increase_mask
-
-        # A spike involves 3 consecutive tokens (t-1, t, t+1).
-        # Ensure they all belong to the same sample to avoid adding placeholders
-        # at the boundary between two sequences in the batch.
-        # The spike_mask has length T-1. We check sample boundaries for indices
-        # i and i+1, which covers the main part of the spike.
-        same_sample_mask = (batch_data.sample_idx[1:-1] == batch_data.sample_idx[2:])
-        # spike_mask is T-1, same_sample_mask is T-2. We align them.
-        spike_mask[1:] &= same_sample_mask
-        
-        spike_indices = torch.where(spike_mask)[0]
-        if spike_indices.numel() == 0:
-            continue
-            
-        # Order spikes by the magnitude of the perplexity increase
-        spike_indices = spike_indices[torch.argsort(ppt_increase[spike_mask], descending=True)]
-        
-        # Select the top spikes up to the budget
-        top_spike_indices = spike_indices[:abstract_budget]
-
-        # Get the sample indices and timestamps for token insertion
-        # A spike at spike_indices[k] means we insert a token before token [spike_indices[k] + 1]
-        add_sample_idx = batch_data.sample_idx[top_spike_indices + 1]
-        add_timestamps = batch_data.timestamps[top_spike_indices + 1]
-        mask_token = gat.level_mask_tokens[add_level]
-
-        batch_data.insert_tokens(add_sample_idx, mask_token, add_level, add_timestamps)
-
-    return batch_data
 
 
 

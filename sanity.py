@@ -383,7 +383,7 @@ def test_generate_rollout_data():
     """
     from gat import GATConfig, GAT
     from sorl import generate_rollout_data
-    from search import repeat_hseq # Assuming repeat_hseq is in search.py
+    from utils import repeat_hseq # Assuming repeat_hseq is in utils.py
     
     print("\n--- Testing generate_rollout_data ---")
     
@@ -422,3 +422,82 @@ def test_generate_rollout_data():
     print("✅ Abstract tokens were added at the correct rhythmic intervals.")
     
     print("✅ `generate_rollout_data` test passed!")
+
+
+def test_add_spike_placeholders():
+    """
+    Tests the add_spike_placeholders function from sorl.py, which uses
+    proportional budget allocation based on perplexity spikes.
+    """
+    from gat import GATConfig, GAT
+    from utils import HierSeq
+    from sorl import add_spike_placeholders
+
+    print("\n--- Testing add_spike_placeholders ---")
+
+    # 1. Setup a dummy model and data
+    config = GATConfig(L=2, K=4, vocab_size_list=[20, 5], device='cpu')
+    model = GAT(config)
+    model.eval()
+
+    # 2. Create a batch with one long sample
+    h_data = [
+        (list(range(10)), []), # L0 tokens
+        (list(range(1, 11)), [])  # L0 timestamps (1-indexed)
+    ]
+    batch = HierSeq.from_hierarchical_data([(h_data[0], h_data[1])], K=4, L=2, device='cpu')
+
+    # 3. Mock the model's forward pass to return a predictable ppt tensor.
+    # The ppt tensor should have N-1 elements for N tokens, representing the
+    # loss of predicting token i+1 given tokens 0...i.
+    # We create a ppt that results in two clear "spikes" (dip then rise).
+    mock_ppt = torch.tensor([5.0, 4.0, 8.0, 4.0, 3.0, 10.0, 5.0, 5.0, 5.0], device='cpu')
+    
+    original_forward = model.forward
+    model.forward = lambda b: mock_ppt
+
+    # 4. Call the function with a budget of 5 tokens for level 1
+    budgets = torch.tensor([0, 5]) 
+    processed_batch = add_spike_placeholders(model, batch.clone(), budgets)
+
+    # 5. Assertions
+    print("Processed batch with spike-based placeholders:")
+    data, ts = processed_batch.to_hierarchical_data()
+    print("Data (Tokens):", data)
+    print("Data (Timestamps):", ts)
+
+    # Expected behavior based on mock_ppt:
+    # mock_ppt (len=9)
+    # ppt_increase = [-1, 4, -4, -1, 7, -5, 0, 0] (len=8)
+    # Spikes (dip then rise) are at indices 1 and 4 of ppt_increase.
+    # Spike values are 4 and 7. Total weight = 11. Budget = 5.
+    # Allocation for spike 1 (weight 4): floor((4/11)*5) = 1. Remainder: 0.81
+    # Allocation for spike 2 (weight 7): floor((7/11)*5) = 3. Remainder: 0.18
+    # Remaining budget (5 - 1 - 3 = 1) goes to spike 1 due to larger remainder.
+    # Final counts: 2 tokens for spike 1, 3 for spike 2.
+    # Spike 1 is at ppt_increase index 1, insertion ts = original_ts[1+1] = 3.
+    # Spike 2 is at ppt_increase index 4, insertion ts = original_ts[4+1] = 6.
+    
+    level1_timestamps = torch.tensor(ts[0][1])
+    
+    expected_total_tokens = 5
+    assert len(level1_timestamps) == expected_total_tokens, \
+        f"Expected {expected_total_tokens} L1 tokens, but got {len(level1_timestamps)}"
+    print(f"✅ Correct total number of tokens added ({expected_total_tokens}).")
+
+    expected_ts_3_count = 2
+    ts_3_count = (level1_timestamps == 3).sum().item()
+    assert ts_3_count == expected_ts_3_count, \
+        f"Expected {expected_ts_3_count} tokens at ts=3, but got {ts_3_count}"
+    print(f"✅ Correct number of tokens at ts=3 ({expected_ts_3_count}).")
+    
+    expected_ts_6_count = 3
+    ts_6_count = (level1_timestamps == 6).sum().item()
+    assert ts_6_count == expected_ts_6_count, \
+        f"Expected {expected_ts_6_count} tokens at ts=6, but got {ts_6_count}"
+    print(f"✅ Correct number of tokens at ts=6 ({expected_ts_6_count}).")
+
+    print("✅ `add_spike_placeholders` test passed!")
+    
+    # Restore original method
+    model.forward = original_forward
