@@ -13,10 +13,20 @@ from pathlib import Path
 
 # util function
 # ------------------------------------------------------------------------
-def infer_level_from_idx(indices: torch.Tensor, vocab_sizes: torch.Tensor):
+def infer_level(indices: torch.Tensor, vocab_sizes: torch.Tensor, pad_token: int):
     indices_expanded = indices.unsqueeze(-1)  # [batch_size, seq_len, 1]
     levels = (indices_expanded < vocab_sizes.cumsum(dim=0)).int().argmax(dim=-1)
-    return levels
+
+    padding_mask = (indices == pad_token)
+    final_levels = torch.where(padding_mask, -1, levels.long())
+    return final_levels
+
+def infer_timestamp(levels: torch.Tensor, K: int, l: int = 1) -> torch.Tensor:
+    is_level = (levels == l-1).long()  
+    cumulative_counts = torch.cumsum(is_level, dim=-1)
+    timestamps = (cumulative_counts - 1) // K
+    timestamps.clamp_(min=0) # this assings the correct timestamp 
+    return levels, timestamps
 # ------------------------------------------------------------------------s
 
 @dataclass
@@ -32,6 +42,7 @@ class GATConfig:
     _compile: bool = True
 
 
+# New version, aligned with GPT architecture, without level-embedding
 class reGAT(nn.Module): 
 
     def __init__(self, config):
@@ -43,6 +54,7 @@ class reGAT(nn.Module):
         # multi-level vocab specific parameters
         self.total_vocab_size = sum(config.vocab_size_list)
         self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device)
+        self.level_mask_tokens = self.vocab_sizes.cumsum(dim=0)
         self.level_vocab_starts = torch.concat([torch.tensor([0.], device=config.device), self.vocab_sizes])[:-1]
         self.level_vocab_ends = self.vocab_sizes.cumsum(dim=0)
         
@@ -101,7 +113,7 @@ class reGAT(nn.Module):
 
         x = norm(x)
 
-        levels = infer_level_from_idx(idx, self.vocab_sizes)
+        levels = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
         next_token = self._decode(self.lm_head(x[denoise_mask]), levels=levels[denoise_mask], temperature=temperature)
         idx[denoise_mask] = next_token
 
@@ -158,6 +170,8 @@ class reGAT(nn.Module):
                 
         logits = 30 * torch.tanh(logits / 30)
         logits = logits.float()
+
+        logits[:, self.level_vocab_ends-1] = float('-inf') # Invalidate ALL MASK_TOK logits
 
         if levels is not None:
             assert levels.shape == logits.shape[:-1], "Levels and logits must have the same shape except for the last dimension"
