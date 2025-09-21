@@ -4,7 +4,9 @@
 # ------------------------------------------------------------------------------------------------
 from dataset.base import BaseHierDataset
 from search import get_hier_batch_with_index, pad_abstract_tokens, get_hier_batch, compute_ssl_loss, compute_abs_ssl_loss, evaluate_gat
-from search import compute_curriculum_t_increment, sorl_search_v2, get_batch, eval_search_improvement, eval_ppl_with_search, eval_generate_ppl, observe_abstraction
+from search import compute_curriculum_t_increment, get_batch, eval_search_improvement
+from sorl import sorl_search, pad_abstract_tokens
+
 from dataset.base import BaseDataset
 from search import SORLConfig
 from model import GAT
@@ -94,7 +96,7 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
 
         with torch.no_grad(): 
     
-            repeat_batch, switch_ratio, rollout_advantages = sorl_search_v2(gat, batch_data, config.n_generations, config.temperature, t_search)
+            repeat_batch, switch_ratio, rollout_advantages = sorl_search(gat, batch_data, config.n_generations, config.temperature, t_search)
             
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

@@ -181,6 +181,7 @@ def repad_abstract_tokens(batch_data: HierSeq, keep_ratio: float, level_mask_tok
     replaces the rest with their corresponding MASK placeholder tokens.
     """
     n_replace = 0 
+    kv_cache_mask = torch.zeros_like(batch_data.tokens, dtype=torch.bool, device=batch_data.device)
 
     for sample_idx in batch_data.indices:
 
@@ -195,36 +196,32 @@ def repad_abstract_tokens(batch_data: HierSeq, keep_ratio: float, level_mask_tok
             batch_data.tokens[indices_to_replace] = mask_tokens_to_insert
             n_replace += len(indices_to_replace) 
 
-    return batch_data, n_replace
+            # Set kv_cache=True on tokens we keep (before the first to-be-replaced abstract token)
+            first_replace_idx = indices_to_replace[0]
+            sample_mask = batch_data.sample_idx == sample_idx.item()
+            # Mark all tokens of this sample that come before the first replacement
+            kv_cache_mask[sample_mask & (torch.arange(len(batch_data.tokens), device=batch_data.device) < first_replace_idx)] = True
+        else:
+            # If we're keeping all abstract tokens, cache the entire sample
+            kv_cache_mask[batch_data.sample_idx == sample_idx.item()] = True
+
+    return batch_data, n_replace, kv_cache_mask
 
 
 # Generate chunk by chunk, parallel within chunk (KV cache to be added)
-# (TBD). Include KV-cache inside. 
-# --------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------------------------
 def chunk_generate(model: GAT, batch: HierSeq, n_step: int, temperature: float = 0.0):
 
-    model.generate(batch, parallel=True, temperature=temperature)
+    batch = model.generate(batch, parallel=True, temperature=temperature)
 
     ratio_schedule = torch.linspace(0.0, 1.0, n_step+1)[1:-1]
     for ratio in ratio_schedule: 
-        batch, n_replace = repad_abstract_tokens(batch, ratio.item(), model.level_mask_tokens)
+        batch, n_replace, _ = repad_abstract_tokens(batch, ratio.item(), model.level_mask_tokens)
         if n_replace == 0: 
             break 
-        model.generate(batch, parallel=True, temperature=0.0)
+        batch  = model.generate(batch, parallel=True, temperature=0.0)
 
     return batch
-
-
-# ------------------------------------------------------------------------------------------------
-# Causal Abstraction Generation (one-by-one) is the only way to leverage proper attention to previous abstractions
-# - tricks like rhythmic abstraction generation can be easily integraed into causal generation
-# - ideally the spike-based abstraction addition can also be integrated into causal generation
-# - that way we unify "inference / evaluation" with "rollout generation"
-# - it's just quite complicated to integrate causal generation .... 
-# - is there an easier way of doing this? how about segment-wise parallel generation?
-# - or, better yet, how about just denoising style iterative refinement? 
-# - The simplest way: 
-# ------------------------------------------------------------------------------------------------
 
 
 
@@ -294,6 +291,7 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
                 use_rhythmic_placeholders: bool = False,
                 use_diminish_memory: bool = False,
                 t_keep: int = 0,
+                chunk_generate_step: int = 1,
     ): 
 
     """Explore, Evaluate, Select || Pinned greedy sample ver."""
@@ -303,8 +301,8 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
 
     # explore
     assert n > 1, "n must be greater than 1"
-    ref_batch = generate_rollout_data(gat, batch_data, 1, 0.0, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep)
-    explore_batch = generate_rollout_data(gat, batch_data, n-1, temperature, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep)
+    ref_batch = generate_rollout_data(gat, batch_data, 1, 0.0, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep, chunk_generate_step)
+    explore_batch = generate_rollout_data(gat, batch_data, n-1, temperature, t_search, use_spike_placeholders, abstract_budgets, use_rhythmic_placeholders, use_diminish_memory, t_keep, chunk_generate_step)
 
     ref_batch = concatenate_hseq(ref_batch, explore_batch)
 
@@ -315,3 +313,29 @@ def sorl_search(gat: GAT, batch_data: HierSeq, n: int, temperature: float, t_sea
     select_batch, switch_ratio, rollout_advantages = select_best_abstraction(ref_batch, ppt)
 
     return select_batch, switch_ratio, rollout_advantages
+
+
+# Loss computation 
+# ------------------------------------------------------------------------------------------------
+def compute_ssl_loss(repeat_batch: HierSeq, ppt: torch.Tensor): 
+
+    traj_mask =(repeat_batch.levels[1:] == 0) & (repeat_batch.timestamps[1:] > 1)
+    traj_ppt = ppt[traj_mask]
+
+    ssl_loss = traj_ppt.mean()
+
+    return ssl_loss
+
+def compute_abs_ssl_loss(repeat_batch, ppt, level):
+
+    ab_mask =(repeat_batch.levels[1:] == level) & (repeat_batch.timestamps[1:] > 1)
+    ab_ppt = ppt[ab_mask]
+    
+    if len(ab_ppt) == 0: 
+        return torch.tensor(0.0, device=repeat_batch.tokens.device)
+
+    ssl_loss = ab_ppt.mean()
+
+    return ssl_loss
+# ------------------------------------------------------------------------------------------------
+

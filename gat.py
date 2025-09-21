@@ -1,7 +1,7 @@
 from model import Block, CastedLinear, create_block_mask
 from utils import create_loss_mask, HierSeq
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Tuple
 import torch
 import itertools
 from constant import MASK_TOK
@@ -11,6 +11,13 @@ import torch.nn as nn
 from typing import Union
 from pathlib import Path
 
+# util function
+# ------------------------------------------------------------------------
+def infer_level_from_idx(indices: torch.Tensor, vocab_sizes: torch.Tensor):
+    indices_expanded = indices.unsqueeze(-1)  # [batch_size, seq_len, 1]
+    levels = (indices_expanded < vocab_sizes.cumsum(dim=0)).int().argmax(dim=-1)
+    return levels
+# ------------------------------------------------------------------------s
 
 @dataclass
 class GATConfig:
@@ -23,6 +30,151 @@ class GATConfig:
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
     device: str = "cuda"
     _compile: bool = True
+
+
+class reGAT(nn.Module): 
+
+    def __init__(self, config):
+        super().__init__()
+        self.num_layers = config.n_layer
+        self.L = config.L
+        self.K = config.K
+
+        # multi-level vocab specific parameters
+        self.total_vocab_size = sum(config.vocab_size_list)
+        self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device)
+        self.level_vocab_starts = torch.concat([torch.tensor([0.], device=config.device), self.vocab_sizes])[:-1]
+        self.level_vocab_ends = self.vocab_sizes.cumsum(dim=0)
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(self.total_vocab_size, config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+        ))
+        self.lm_head = CastedLinear(config.n_embd, self.total_vocab_size)
+        self.lm_head.weight.data.zero_()
+
+        self.device = config.device
+        self._compile = config._compile
+
+    def forward(self, idx: torch.Tensor, target: torch.Tensor):
+
+        def causal_mask(b, h, q_idx, kv_idx):
+          causal_mask = q_idx >= kv_idx
+          return causal_mask
+
+        S = idx.shape[1]
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1, _ = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+        logits = self.lm_head(x)
+        logits = 30 * torch.tanh(logits / 30)
+        logits = logits.float()
+
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), reduction="none")
+        return loss 
+
+
+    def denoise(self, idx: torch.Tensor, denoise_mask: torch.Tensor, temperature: float = 0.0): 
+
+        def causal_mask(b, h, q_idx, kv_idx):
+          causal_mask = q_idx >= kv_idx
+          return causal_mask
+
+        S = idx.shape[1]
+        block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        x0 = x
+        v1 = None
+
+        for i in range(self.num_layers):
+            x, v1, _ = self.transformer.h[i](x, v1, x0, block_mask)
+
+        x = norm(x)
+
+        levels = infer_level_from_idx(idx, self.vocab_sizes)
+        next_token = self._decode(self.lm_head(x[denoise_mask]), levels=levels[denoise_mask], temperature=temperature)
+        idx[denoise_mask] = next_token
+
+        return idx
+
+
+    def generate(self, idx: torch.Tensor, temperature: float = 0.0, kv_cache: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None): 
+        
+        is_cached_pass = kv_cache is not None
+        
+        if is_cached_pass:
+            assert idx.shape[1] == 1, "For cached generation, provide only the new token"
+            x = self.transformer.wte(idx)  # [batch_size, 1, n_embd]
+            cache_len = kv_cache[0][0].shape[1] if kv_cache[0] is not None else 0
+            total_len = cache_len + 1
+            def causal_mask(b, h, q_idx, kv_idx):
+                return kv_idx >= 0  # Always true since we're at the end of sequence
+            q_len = 1
+            kv_len = total_len
+        else:
+            x = self.transformer.wte(idx)  # [batch_size, seq_len, n_embd]
+            def causal_mask(b, h, q_idx, kv_idx):
+                causal_mask = q_idx >= kv_idx
+                return causal_mask
+            S = idx.shape[1]
+            q_len = S
+            kv_len = S
+            kv_cache = [None] * self.num_layers  # Initialize cache list
+
+        block_mask = create_block_mask(causal_mask, None, None, q_len, kv_len, device=self.device, _compile=self._compile)
+        
+        x = norm(x)
+        x0 = x
+        v1 = None
+        
+        new_kv_cache = []
+        for i in range(self.num_layers):
+            layer_cache = kv_cache[i] if is_cached_pass else None
+            x, v1, updated_cache = self.transformer.h[i](
+                x, v1, x0, block_mask, 
+                cache=layer_cache, 
+                cache_offset=0 if not is_cached_pass else kv_cache[0][0].shape[1]
+            )
+            new_kv_cache.append(updated_cache)
+
+        x = norm(x)
+
+        next_token = self._decode(self.lm_head(x[:, -1, :]), temperature=temperature)
+
+        return next_token, new_kv_cache
+
+
+    def _decode(self, logits: torch.Tensor, levels: Optional[torch.Tensor] = None, temperature: float = 0.0):
+                
+        logits = 30 * torch.tanh(logits / 30)
+        logits = logits.float()
+
+        if levels is not None:
+            assert levels.shape == logits.shape[:-1], "Levels and logits must have the same shape except for the last dimension"
+            start_logits = self.level_vocab_starts[levels]
+            end_logits = self.level_vocab_ends[levels]
+
+            vocab_indices = torch.arange(logits.size(-1), device=self.device)
+            mask = (vocab_indices >= start_logits.unsqueeze(-1)) & (vocab_indices < end_logits.unsqueeze(-1))
+
+            logits = torch.where(mask, logits, torch.tensor(-float('inf')))
+
+        if temperature == 0.0:
+            next_token = torch.argmax(logits, dim=-1)
+        else:
+            next_token = torch.multinomial(F.softmax(logits / temperature, dim=-1), num_samples=1).squeeze(-1)
+        return next_token
+
 
 
 class GAT(nn.Module):
@@ -81,48 +233,36 @@ class GAT(nn.Module):
 
         return self._compute_ppt(x, batch_data)
     
-    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0, kv_cache=None, 
+    def generate(self, batch_data: HierSeq, parallel: bool = False, temperature: float = 0.0,  
                  levels: Optional[torch.Tensor] = None):
-        is_causal_pass = kv_cache is not None
 
-        if is_causal_pass: # This part needs to be dynamic -- upto first place-holder abstract token, cache is meaningful
-            x = self._create_hseq_embd_for_token(batch_data.tokens[-1], batch_data.levels[-1])
-            cache_offset = batch_data.tokens.shape[0] - 1
-            q_len = 1
-            kv_len = batch_data.tokens.shape[0]
-        else:
-            x = self._create_hseq_embd(batch_data, do_slice=False)
-            cache_offset = 0
-            kv_cache = [None] * self.num_layers
-            q_len = batch_data.tokens.shape[0]
-            kv_len = q_len
+        input_idx, sample_idx = batch_data.tokens, batch_data.sample_idx
 
-        sample_idx = batch_data.sample_idx
-        
         def sample_causal_mask(b, h, q_idx, kv_idx):
-            q_pos = q_idx + cache_offset
-            causal_mask = q_pos >= kv_idx
-            sample_mask = sample_idx[q_pos] == sample_idx[kv_idx]
+            causal_mask = q_idx >= kv_idx
+            sample_mask = sample_idx[q_idx] == sample_idx[kv_idx]
             return causal_mask & sample_mask
 
-        block_mask = create_block_mask(sample_causal_mask, None, None, q_len, kv_len, device=self.device, _compile=self._compile)
+        S = input_idx.shape[0]
+        block_mask = create_block_mask(sample_causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
+
+        x = self._create_hseq_embd(batch_data, do_slice=False)
 
         x = norm(x)
         x0 = x
         v1 = None
 
         for i in range(self.num_layers):
-            x, v1, kv_cache[i] = self.transformer.h[i](x, v1, x0, block_mask, cache=kv_cache[i], cache_offset=cache_offset)
+            x, v1, _ = self.transformer.h[i](x, v1, x0, block_mask)
 
         x = norm(x)
 
         if parallel:
             batch_data = self._denoise(x, batch_data, temperature)
-            kv_cache = None # Denoising modifies the sequence, invalidating the cache
         else:
             batch_data = self._generate(x, batch_data, temperature, levels)
 
-        return batch_data, kv_cache
+        return batch_data
 
     def save_checkpoint(self, path: Union[str, Path]):
         torch.save(self.state_dict(), path)
