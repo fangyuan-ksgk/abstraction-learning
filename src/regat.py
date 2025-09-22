@@ -110,7 +110,7 @@ class GAT(nn.Module):
         x = norm(x)
 
         next_token = self._decode(self.lm_head(x[denoise_mask]), levels=denoise_levels, temperature=temperature)
-        idx[denoise_mask] = next_token
+        idx[:, 1:][denoise_mask[:, :-1]] = next_token
 
         return idx
 
@@ -187,7 +187,7 @@ class GAT(nn.Module):
         logits = 30 * torch.tanh(logits / 30)
         logits = logits.float()
 
-        logits[:, self.level_vocab_ends-1] = float('-inf') # Invalidate ALL MASK_TOK logits
+        logits[:, self.level_mask_tokens] = float('-inf') # Invalidate ALL MASK_TOK logits
 
         if levels is not None:
             assert levels.shape == logits.shape[:-1], "Levels and logits must have the same shape except for the last dimension"

@@ -27,6 +27,7 @@ def add_spike_placeholders(model: GAT, data: torch.Tensor, l: int, abstract_budg
     target = tokens[:, 1:].contiguous()
     with torch.no_grad():
         ppt = model(idx, target)
+
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
     timestamps = infer_timestamp(levels, model.K, l)
     insert_masks = infer_spike_insertion_mask(levels, ppt, l, abstract_budget)
@@ -58,14 +59,19 @@ def pad_abstract_tokens(tokens: torch.Tensor,
 
     return batch_data
 
-
-def prep_denoise(tokens: torch.Tensor, model: GAT, l: int): 
+def repad_abstract_tokens(tokens: torch.Tensor, model: GAT, l: int, start_ts: torch.Tensor): 
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
-    denoise_mask = (levels == model.level_mask_tokens[l])
+    timestamps = infer_timestamp(levels, model.K, l)
+    repad_mask = (timestamps >= start_ts)
+    tokens[repad_mask] = model.level_mask_tokens[l]
+    return tokens
+
+def prep_denoise(tokens: torch.Tensor, model: GAT):
+    levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
+    denoise_mask = torch.isin(tokens, model.level_mask_tokens)
     denoise_levels = levels[denoise_mask]
     denoise_mask = torch.roll(denoise_mask, shifts=-1, dims=1).bool()
     return denoise_mask, denoise_levels
-
 
 def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int, 
                    max_t_search: Optional[int] = None,
@@ -86,10 +92,10 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
 
         start_ts = (search_ts * step).int()
 
-        tokens = pad_abstract_tokens(tokens, model, l, None, start_ts, 
-                            use_spike_placeholders, abstract_budget, use_rhythmic_placeholders)
+        # What we actually need here is "repad" -- not new tricks required, just replace abstract tokens with "mask" from certain timestamp onwards
+        tokens = repad_abstract_tokens(tokens, model, l, start_ts)
 
-        denoise_mask, denoise_levels = prep_denoise(tokens, model, l)
+        denoise_mask, denoise_levels = prep_denoise(tokens, model)
 
         if denoise_levels.numel() > 0:
             with torch.no_grad():  
@@ -99,3 +105,9 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
             break 
 
     return tokens
+
+
+# Missing: 
+# - 1. repeat data 
+# - 2. select best
+# - 3. 
