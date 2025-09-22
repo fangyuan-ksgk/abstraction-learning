@@ -119,7 +119,6 @@ def generate_rollout_data(data: torch.Tensor, model: GAT, l: int,
     repeat_data = chunk_denoise(repeat_data, model, l, steps=steps, max_t_search=max_t_search, temperature=temperature)
     return repeat_data, repeat_data_idx
 
-
 def select_best_abstraction(data: torch.Tensor, model: GAT, l: int, n: int):
     raise NotImplementedError("select_best_abstraction is not implemented")
 
