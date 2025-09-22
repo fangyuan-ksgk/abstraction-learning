@@ -73,7 +73,7 @@ def prep_denoise(tokens: torch.Tensor, model: GAT):
     return denoise_mask, denoise_levels
 
 def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int, 
-                   max_t_search: Optional[int] = None):
+                   max_t_search: Optional[int] = None, temperature: float = 0.0):
 
     tokens = deepcopy(data)
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
@@ -95,7 +95,7 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
 
         if denoise_levels.numel() > 0:
             with torch.no_grad():  
-                tokens = model.denoise(tokens, denoise_mask, denoise_levels, temperature=0.0)
+                tokens = model.denoise(tokens, denoise_mask, denoise_levels, temperature=temperature)
 
         if (start_ts >= max_ts).all(): 
             break 
@@ -103,7 +103,25 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
     return tokens
 
 
-# Missing: 
-# - 1. repeat data 
-# - 2. select best
-# - 3. 
+def generate_rollout_data(data: torch.Tensor, model: GAT, l: int, 
+                          n: int, temperature: float,
+                          steps: int, max_t_search: Optional[int] = None,
+                          t_search: Optional[int] = None, start_ts: Optional[int] = None, use_spike_placeholders: bool = True,
+                          abstract_budget: Optional[int] = 5, use_rhythmic_placeholders: bool = True):
+    # Generate Rollout Data 
+    data_idx = torch.arange(data.shape[0])
+    # (1). Repeat Data | Need to record indices of repeated data for later selection part 
+    repeat_data = data.repeat_interleave(n, dim=0)
+    repeat_data_idx = data_idx.repeat_interleave(n, dim=0)
+    # (2). Pad abstract placeholders
+    repeat_data = pad_abstract_tokens(repeat_data, model, l, t_search=t_search, start_ts=start_ts, use_spike_placeholders=use_spike_placeholders, abstract_budget=abstract_budget, use_rhythmic_placeholders=use_rhythmic_placeholders)
+    # (3). Denoise 
+    repeat_data = chunk_denoise(repeat_data, model, l, steps=steps, max_t_search=max_t_search, temperature=temperature)
+    return repeat_data, repeat_data_idx
+
+
+def select_best_abstraction(data: torch.Tensor, model: GAT, l: int, n: int):
+    raise NotImplementedError("select_best_abstraction is not implemented")
+
+def sorl_search(gat: GAT, batch_data: torch.Tensor, n: int, temperature: float, t_search: Optional[int] = None):
+    raise NotImplementedError("sorl_search is not implemented")
