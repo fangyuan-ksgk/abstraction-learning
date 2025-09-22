@@ -62,7 +62,7 @@ def pad_abstract_tokens(tokens: torch.Tensor,
 def repad_abstract_tokens(tokens: torch.Tensor, model: GAT, l: int, start_ts: torch.Tensor): 
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
     timestamps = infer_timestamp(levels, model.K, l)
-    repad_mask = (timestamps >= start_ts)
+    repad_mask = (timestamps >= start_ts.unsqueeze(1)) & (levels == l)
     tokens[repad_mask] = model.level_mask_tokens[l]
     return tokens
 
@@ -70,14 +70,10 @@ def prep_denoise(tokens: torch.Tensor, model: GAT):
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
     denoise_mask = torch.isin(tokens, model.level_mask_tokens)
     denoise_levels = levels[denoise_mask]
-    denoise_mask = torch.roll(denoise_mask, shifts=-1, dims=1).bool()
     return denoise_mask, denoise_levels
 
 def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int, 
-                   max_t_search: Optional[int] = None,
-                   use_spike_placeholders: bool = False,
-                   abstract_budget: Optional[int] = None,
-                   use_rhythmic_placeholders: bool = False):
+                   max_t_search: Optional[int] = None):
 
     tokens = deepcopy(data)
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])

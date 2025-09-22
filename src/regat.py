@@ -36,7 +36,7 @@ class GAT(nn.Module):
         self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device) + 1
         self.total_vocab_size = sum(self.vocab_sizes)
         self.level_mask_tokens = self.vocab_sizes.cumsum(dim=0) - 1
-        self.level_vocab_starts = torch.concat([torch.tensor([0.], device=config.device), self.vocab_sizes])[:-1]
+        self.level_vocab_starts = torch.concat([torch.tensor([0.], device=config.device), self.vocab_sizes.cumsum(dim=0)])[:-1]
         self.level_vocab_ends = self.vocab_sizes.cumsum(dim=0)
         
         self.transformer = nn.ModuleDict(dict(
@@ -109,8 +109,9 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        next_token = self._decode(self.lm_head(x[denoise_mask]), levels=denoise_levels, temperature=temperature)
-        idx[:, 1:][denoise_mask[:, :-1]] = next_token
+        rep_mask = torch.roll(denoise_mask, -1, dims=1)
+        next_token = self._decode(self.lm_head(x[rep_mask]), levels=denoise_levels, temperature=temperature)
+        idx[denoise_mask] = next_token
 
         return idx
 
