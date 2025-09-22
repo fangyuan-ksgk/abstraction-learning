@@ -52,9 +52,9 @@ class reGAT(nn.Module):
         self.K = config.K
 
         # multi-level vocab specific parameters
-        self.total_vocab_size = sum(config.vocab_size_list)
-        self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device)
-        self.level_mask_tokens = self.vocab_sizes.cumsum(dim=0)
+        self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device) + 1
+        self.total_vocab_size = sum(self.vocab_sizes)
+        self.level_mask_tokens = self.vocab_sizes.cumsum(dim=0) - 1
         self.level_vocab_starts = torch.concat([torch.tensor([0.], device=config.device), self.vocab_sizes])[:-1]
         self.level_vocab_ends = self.vocab_sizes.cumsum(dim=0)
         
@@ -91,7 +91,9 @@ class reGAT(nn.Module):
         logits = logits.float()
 
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), reduction="none")
-        return loss 
+        loss = loss.view(idx.shape[0], idx.shape[1])
+        loss[torch.isin(target, self.level_mask_tokens)] = 0 # ignore loss for mask tokens
+        return loss
 
 
     def denoise(self, idx: torch.Tensor, denoise_mask: torch.Tensor, temperature: float = 0.0): 
