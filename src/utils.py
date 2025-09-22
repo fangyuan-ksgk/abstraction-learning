@@ -1,0 +1,123 @@
+import torch
+from typing import Optional
+
+def infer_level(indices: torch.Tensor, vocab_sizes: torch.Tensor, pad_token: int):
+    indices_expanded = indices.unsqueeze(-1)  # [batch_size, seq_len, 1]
+    levels = (indices_expanded < vocab_sizes.cumsum(dim=0)).int().argmax(dim=-1)
+
+    padding_mask = (indices == pad_token)
+    final_levels = torch.where(padding_mask, -1, levels.long())
+    return final_levels
+
+# this produces 'abstract timestamps'
+def infer_timestamp(levels: torch.Tensor, K: int, l: int = 1) -> torch.Tensor:
+    """timestamp starts from 0"""
+    is_level = (levels == l-1).long()  
+    cumulative_counts = torch.cumsum(is_level, dim=-1)
+    timestamps = (cumulative_counts - 1) // K
+    timestamps.clamp_(min=0) # this assings the correct timestamp 
+    return timestamps
+
+# Rhythmic insertion mask calculation
+def infer_rythmic_insertion_mask(levels: torch.Tensor, timestamps: torch.Tensor, K: int, l: int): 
+    """When t_search = 1, we insert placeholder up to timestamp <= 0, or timestamp < t_search"""
+    within_level_mask = (levels <= l)
+    timestamps[~within_level_mask] = False 
+
+    B = timestamps.size(0)
+    is_end_of_groups = torch.cat([
+        (timestamps[:, :-1] != timestamps[:, 1:]),
+        torch.full((B, 1), True, device=timestamps.device)
+    ], dim=1)
+
+    is_valid_elements = [] 
+    for timestamp in timestamps: 
+        group_counts = torch.bincount(timestamp) # count consecutive value group size
+        is_valid_group = group_counts >= K 
+        is_valid_element = is_valid_group[timestamp] # timestamp starts from 0 makes this valid
+        is_valid_elements.append(is_valid_element)
+    is_valid_elements = torch.stack(is_valid_elements, dim=0)
+
+    insert_mask = is_end_of_groups & is_valid_elements
+    insert_mask[:, -1] = False 
+    insert_mask = torch.roll(insert_mask.int(), shifts=1, dims=1)
+    
+    return insert_mask # insert before 'True' position
+
+def allocate_budget(spike_weights, abstract_budget):
+    normalized_weights = spike_weights / spike_weights.sum()
+    ideal_counts = normalized_weights * abstract_budget
+    token_counts = torch.floor(ideal_counts).long()
+    remainder = abstract_budget - token_counts.sum()
+
+    if remainder > 0:
+        residuals = ideal_counts - token_counts
+        _, top_indices = torch.topk(residuals, int(remainder))
+        token_counts[top_indices] += 1
+
+    return token_counts 
+
+def infer_spike_insertion_mask(levels: torch.Tensor, ppt: torch.Tensor, l: int, abstract_budget: int): 
+    level_masks = (levels[:, 1:] == l-1)
+
+    ppt_increase = torch.zeros_like(ppt[:, 1:], device=ppt.device).float()
+    for i, (sample_ppt, level_mask) in enumerate(zip(ppt, level_masks)): 
+        sample_ppt = sample_ppt[level_mask]
+        ppt_increase[i, level_mask[1:]] = sample_ppt[1:] - sample_ppt[:-1]
+
+    spike_mask = (ppt_increase > 0) 
+    spike_indices = torch.where(spike_mask)[0]
+
+    insert_masks = torch.zeros_like(spike_mask).int()
+    if spike_indices.numel() > 0: 
+        
+        spike_weights = ppt_increase[spike_mask]
+        token_counts = allocate_budget(spike_weights, abstract_budget)
+
+        non_zero_mask = token_counts > 0
+        final_counts = token_counts[non_zero_mask].int()
+
+        # - insert_mask (we can put integer value into the mask, too)
+        update_mask = torch.zeros_like(insert_masks, dtype=torch.bool)
+        update_mask[spike_mask] = non_zero_mask
+        insert_masks[update_mask] = final_counts
+    
+    insert_masks = torch.cat([torch.zeros_like(spike_mask).int()[:, :2], insert_masks], dim=1) # operate on 'data'
+    return insert_masks
+
+def insert_tokens(
+    tokens: torch.Tensor,
+    insert_masks: torch.Tensor,
+    placeholder_token: int,
+    pad_token: int
+) -> torch.Tensor:
+    """Insert before 'True' position"""
+
+    B, S_orig = tokens.shape
+    device = tokens.device
+
+    n_insertions_per_sample = insert_masks.sum(dim=1)
+    max_n_insertions = n_insertions_per_sample.max().item()
+
+    if max_n_insertions == 0:
+        return tokens
+
+    S_new = S_orig + max_n_insertions
+    new_tokens = torch.full((B, S_new), pad_token, dtype=tokens.dtype, device=device)
+
+    shifts = torch.cumsum(insert_masks, dim=1)
+    original_indices_seq = torch.arange(S_orig, device=device).expand(B, -1)
+    original_dest_indices = original_indices_seq + shifts
+    new_tokens.scatter_(1, original_dest_indices, tokens)
+    ph_rows, ph_cols = insert_masks.nonzero(as_tuple=True)
+    
+    if ph_rows.numel() > 0:
+        n_inserts = insert_masks[ph_rows, ph_cols]
+        token_dest_indices = ph_cols + shifts[ph_rows, ph_cols]
+        ph_offsets = torch.cat([torch.arange(k, 0, -1, device=device) for k in n_inserts])
+        ph_dest_rows = torch.repeat_interleave(ph_rows, n_inserts)
+        repeated_token_dest = torch.repeat_interleave(token_dest_indices, n_inserts)
+        ph_dest_cols = repeated_token_dest - ph_offsets
+        new_tokens[ph_dest_rows, ph_dest_cols] = placeholder_token
+
+    return new_tokens
