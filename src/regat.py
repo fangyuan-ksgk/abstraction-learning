@@ -14,6 +14,7 @@ class GATConfig:
     n_head : int = 6
     n_embd : int = 768
     flex_kernel_options: Optional[dict] = None
+    t_keep : int = 1024 # memory span (for trajectory-level memories)
     K: int = 4  # abstraction ratio
     L: int = 4  # total # of levels (including 0-th level)
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
@@ -29,6 +30,7 @@ class GAT(nn.Module):
         self.num_layers = config.n_layer
         self.L = config.L
         self.K = config.K
+        self.t_keep = config.t_keep
 
         # multi-level vocab specific parameters
         self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device) + 1
@@ -49,9 +51,16 @@ class GAT(nn.Module):
 
     def forward(self, idx: torch.Tensor, target: torch.Tensor):
 
+        levels = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
+
         def causal_mask(b, h, q_idx, kv_idx):
-          causal_mask = q_idx >= kv_idx
-          return causal_mask
+            causal_mask = q_idx >= kv_idx
+
+            is_higher_level = levels[b, kv_idx] > 0
+            is_recent = (q_idx - kv_idx) <= self.t_keep
+            keep_mask = is_higher_level | is_recent 
+            return causal_mask & keep_mask
+
 
         S = idx.shape[1]
         block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
@@ -75,11 +84,17 @@ class GAT(nn.Module):
         return loss
 
 
-    def denoise(self, idx: torch.Tensor, denoise_mask: torch.Tensor, temperature: float = 0.0): 
+    def denoise(self, idx: torch.Tensor, denoise_mask: torch.Tensor, denoise_levels: torch.Tensor, temperature: float = 0.0): 
+
+        levels = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
 
         def causal_mask(b, h, q_idx, kv_idx):
-          causal_mask = q_idx >= kv_idx
-          return causal_mask
+            causal_mask = q_idx >= kv_idx
+            
+            is_higher_level = levels[b, kv_idx] > 0
+            is_recent = (q_idx - kv_idx) <= self.t_keep
+            keep_mask = is_higher_level | is_recent 
+            return causal_mask & keep_mask
 
         S = idx.shape[1]
         block_mask = create_block_mask(causal_mask, None, None, S, S, device=self.device, _compile=self._compile)
@@ -94,35 +109,55 @@ class GAT(nn.Module):
 
         x = norm(x)
 
-        levels = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
-        next_token = self._decode(self.lm_head(x[denoise_mask]), levels=levels[denoise_mask], temperature=temperature)
+        next_token = self._decode(self.lm_head(x[denoise_mask]), levels=denoise_levels, temperature=temperature)
         idx[denoise_mask] = next_token
 
         return idx
 
 
-    def generate(self, idx: torch.Tensor, temperature: float = 0.0, kv_cache: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None): 
+    def generate(self, idx: torch.Tensor, temperature: float = 0.0, 
+               kv_cache: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+               levels: Optional[torch.Tensor] = None): 
         
         is_cached_pass = kv_cache is not None
         
         if is_cached_pass:
             assert idx.shape[1] == 1, "For cached generation, provide only the new token"
-            x = self.transformer.wte(idx)  # [batch_size, 1, n_embd]
-            cache_len = kv_cache[0][0].shape[1] if kv_cache[0] is not None else 0
-            total_len = cache_len + 1
+            assert levels is not None, "Levels must be provided for cached generation"
+            
+            x = self.transformer.wte(idx)
+            
+            q_idx_val = levels.shape[1]
+            
             def causal_mask(b, h, q_idx, kv_idx):
-                return kv_idx >= 0  # Always true since we're at the end of sequence
+                current_q_pos = q_idx_val + q_idx
+                
+                is_higher_level = levels[b, kv_idx] > 0
+                is_recent = (current_q_pos - kv_idx) <= self.t_keep
+                keep_mask = is_higher_level | is_recent
+                return keep_mask
+            
             q_len = 1
-            kv_len = total_len
+            kv_len = q_idx_val + 1
+            
+            new_level = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
+            levels = torch.cat([levels, new_level], dim=1)
         else:
-            x = self.transformer.wte(idx)  # [batch_size, seq_len, n_embd]
+            x = self.transformer.wte(idx) 
+            levels = infer_level(idx, self.vocab_sizes, self.level_mask_tokens[0])
+
             def causal_mask(b, h, q_idx, kv_idx):
                 causal_mask = q_idx >= kv_idx
-                return causal_mask
+                
+                is_higher_level = levels[b, kv_idx] > 0
+                is_recent = (q_idx - kv_idx) <= self.t_keep
+                keep_mask = is_higher_level | is_recent 
+                return causal_mask & keep_mask
+                
             S = idx.shape[1]
             q_len = S
             kv_len = S
-            kv_cache = [None] * self.num_layers  # Initialize cache list
+            kv_cache = [None] * self.num_layers
 
         block_mask = create_block_mask(causal_mask, None, None, q_len, kv_len, device=self.device, _compile=self._compile)
         
@@ -144,7 +179,7 @@ class GAT(nn.Module):
 
         next_token = self._decode(self.lm_head(x[:, -1, :]), temperature=temperature)
 
-        return next_token, new_kv_cache
+        return next_token, new_kv_cache, levels
 
 
     def _decode(self, logits: torch.Tensor, levels: Optional[torch.Tensor] = None, temperature: float = 0.0):

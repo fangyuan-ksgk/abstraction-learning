@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Optional, Union
 
 def infer_level(indices: torch.Tensor, vocab_sizes: torch.Tensor, pad_token: int):
     indices_expanded = indices.unsqueeze(-1)  # [batch_size, seq_len, 1]
@@ -84,6 +84,23 @@ def infer_spike_insertion_mask(levels: torch.Tensor, ppt: torch.Tensor, l: int, 
     
     insert_masks = torch.cat([torch.zeros_like(spike_mask).int()[:, :2], insert_masks], dim=1) # operate on 'data'
     return insert_masks
+
+def infer_valid_masks(timestamps: torch.Tensor, start_ts: Optional[torch.Tensor] = None, t_search: Optional[Union[int, torch.Tensor]] = None): 
+    
+    if start_ts is None and t_search is None: 
+        return torch.ones_like(timestamps, dtype=torch.int)
+
+    if start_ts is None: 
+        start_ts = torch.zeros_like(timestamps[:, 0])
+    if t_search is None: 
+        t_search = 1e9
+
+    end_ts = start_ts + t_search
+
+    valid_masks = (timestamps < end_ts.unsqueeze(1)) & (timestamps >= start_ts.unsqueeze(1))
+    valid_masks = torch.roll(valid_masks, shifts=1, dims=1).int()
+
+    return valid_masks
 
 def insert_tokens(
     tokens: torch.Tensor,
