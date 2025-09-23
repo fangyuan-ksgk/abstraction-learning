@@ -1,8 +1,20 @@
 from src.regat import GAT
-from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks
+from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks, group_argmax
 from copy import deepcopy
 import torch
 from typing import Optional, Union 
+from dataclasses import dataclass
+
+@dataclass 
+class SORLConfig: 
+    l: int # level of abstraction to search & learn
+    n: int # number of candidates to rollout 
+    temperature: float 
+    steps: int  # steps for chunk-wise denoise
+    abstract_budget: int # max number of spiky abstraction allowed
+    use_rhythmic_placeholders: bool = True # whether to use rhythmic placeholders
+    use_spike_placeholders: bool = True # whether to use spike placeholders
+
 
 # Placeholder addition function (for parallel search & training)
 # -----------------------------------------------------------------------------------------------------
@@ -102,7 +114,6 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
 
     return tokens
 
-
 def generate_rollout_data(data: torch.Tensor, model: GAT, l: int, 
                           n: int, temperature: float,
                           steps: int, max_t_search: Optional[int] = None,
@@ -119,8 +130,21 @@ def generate_rollout_data(data: torch.Tensor, model: GAT, l: int,
     repeat_data = chunk_denoise(repeat_data, model, l, steps=steps, max_t_search=max_t_search, temperature=temperature)
     return repeat_data, repeat_data_idx
 
-def select_best_abstraction(data: torch.Tensor, model: GAT, l: int, n: int):
-    raise NotImplementedError("select_best_abstraction is not implemented")
+def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig): 
 
-def sorl_search(gat: GAT, batch_data: torch.Tensor, n: int, temperature: float, t_search: Optional[int] = None):
-    raise NotImplementedError("sorl_search is not implemented")
+    # greedy-involved rollout
+    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n, temperature=0., steps=config.steps)
+    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n, temperature=config.temperature, steps=config.steps)
+
+    combined_data = torch.cat([greedy_data, search_data], dim=0)
+    combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
+
+    with torch.no_grad():
+        ppt = model(idx = combined_data[:, :-1].contiguous(), 
+                    target = combined_data[:, 1:].contiguous())
+
+    # select best for each sample idx
+    idx_max = group_argmax(ppt.mean(axis=1), combined_data_idx)
+    best_data = combined_data[idx_max]
+
+    return best_data

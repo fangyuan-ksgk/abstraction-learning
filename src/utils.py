@@ -138,3 +138,18 @@ def insert_tokens(
         new_tokens[ph_dest_rows, ph_dest_cols] = placeholder_token
 
     return new_tokens
+
+
+def group_argmax(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+
+    unique_groups, group_indices = torch.unique(indices, return_inverse=True)
+    num_groups = len(unique_groups)
+
+    max_vals = torch.full((num_groups, len(values)), float('-inf'))
+    pos_indices = torch.arange(len(values))
+
+    max_vals[group_indices, pos_indices] = values
+
+    indices_argmax = max_vals.argmax(dim=1)
+
+    return indices_argmax
