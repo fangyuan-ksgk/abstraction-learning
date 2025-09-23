@@ -1,5 +1,5 @@
-from src.regat import GAT
-from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks, group_argmax
+from src.gat import GAT
+from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks, group_argmax, group_mean
 from copy import deepcopy
 import torch
 from typing import Optional, Union 
@@ -133,8 +133,9 @@ def generate_rollout_data(data: torch.Tensor, model: GAT, l: int,
 def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig): 
 
     # greedy-involved rollout
-    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n, temperature=0., steps=config.steps)
-    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n, temperature=config.temperature, steps=config.steps)
+    assert config.n > 1, "n must be greater than 1"
+    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps)
+    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps)
 
     combined_data = torch.cat([greedy_data, search_data], dim=0)
     combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
@@ -148,3 +149,11 @@ def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig):
     best_data = combined_data[idx_max]
 
     return best_data
+
+# loss computation (level-0 is trajectory loss, level >= 1 is abstract loss)
+# ------------------------------------------------------------------------------------------------
+def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor): 
+    levels = infer_level(data, model.vocab_sizes, model.level_mask_tokens[0])
+    level_loss = {l: torch.tensor(0.) for l in range(model.L)}
+    level_loss.update(group_mean(ppt, levels[:, 1:]))
+    return level_loss

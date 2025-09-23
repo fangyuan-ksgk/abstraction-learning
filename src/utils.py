@@ -153,3 +153,26 @@ def group_argmax(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     indices_argmax = max_vals.argmax(dim=1)
 
     return indices_argmax
+
+
+def group_mean(values: torch.Tensor, indices: torch.Tensor):
+
+    values = values.flatten() 
+    indices = indices.flatten()
+
+    unique_groups, group_indices = torch.unique(indices, return_inverse=True)
+    num_groups = len(unique_groups)
+
+    group_sums = torch.zeros(num_groups, dtype=values.dtype, device=values.device)
+    group_sums.scatter_add_(0, group_indices, values)
+
+    group_counts = torch.zeros(num_groups, dtype=torch.float, device=values.device)
+    group_counts.scatter_add_(0, group_indices, torch.ones_like(values, dtype=torch.float))
+
+    group_means = group_sums / group_counts
+
+    output = {} 
+    for g, mean in zip(unique_groups, group_means): 
+        output[g.item()] = mean
+        
+    return output
