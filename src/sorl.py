@@ -138,32 +138,35 @@ def heuristic_rollout(data: torch.Tensor, model: GAT, l: int,
     return repeat_data, repeat_data_idx
 
 # Most beautiful way of doing rollout -- no heuristic, no manual placeholders, just model-based decision to maximize 'reward'
-def causal_generate(data: torch.Tensor, model: GAT, temperature: float = 0.0): 
+def causal_generate(data: torch.Tensor, model: GAT, temperature: float): 
     """Model-based decision on when to generate abstraction"""
 
+    pad_token_id = model.level_mask_tokens[0]   
     kv_cache, levels = None, None
-
     progress_idx = torch.zeros(data.size(0), dtype=torch.long)
     current_idx = data[torch.arange(data.size(0)), progress_idx].contiguous()
 
     new_data = current_idx.unsqueeze(1)
 
-    while torch.any(progress_idx < data.size(1) - 2): 
+    while torch.any(progress_idx < data.size(1) - 1): 
 
+        not_finished_mask = progress_idx < data.size(1) - 1
         next_idx, kv_cache, levels = model.generate(current_idx.unsqueeze(1), temperature=temperature, kv_cache=kv_cache, levels=levels)
         next_level = infer_level(next_idx, model.vocab_sizes, model.level_mask_tokens[0])
-
-        traj_mask = next_level == 0
+        traj_mask = (next_level == 0)
+        effective_traj_mask = traj_mask & not_finished_mask
         
         current_idx = next_idx
         
-        if torch.any(traj_mask):
-            gt_tokens = data[torch.arange(data.size(0)), progress_idx + 1]
-            current_idx[traj_mask] = gt_tokens[traj_mask]
+        if torch.any(effective_traj_mask):
+            safe_indices = torch.clamp(progress_idx + 1, max=data.size(1) - 1)
+            gt_tokens = data[torch.arange(data.size(0)), safe_indices]
+            current_idx[effective_traj_mask] = gt_tokens[effective_traj_mask]
         
-        progress_idx += traj_mask.long()
-
-        new_data = torch.cat([new_data, current_idx.unsqueeze(1)], dim=1)
+        progress_idx += effective_traj_mask.long()
+        next_column_to_append = torch.full_like(current_idx, fill_value=pad_token_id)
+        next_column_to_append[not_finished_mask] = current_idx[not_finished_mask]
+        new_data = torch.cat([new_data, next_column_to_append.unsqueeze(1)], dim=1)
 
     return new_data
 
@@ -213,7 +216,7 @@ def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor):
 
 def eval_gat(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
     """Causal rollout do not assume full trajectory to add abstraction, it instead perform causal generation, suited for evaluation"""
-    
+
     with torch.no_grad():        
         assert n > 1, "n must be greater than 1"
         greedy_data, _ = causal_rollout(data, model, temperature=0., n=1, max_t_search=config.max_t_search)
