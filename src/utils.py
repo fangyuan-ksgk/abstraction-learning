@@ -85,7 +85,7 @@ def infer_spike_insertion_mask(levels: torch.Tensor, ppt: torch.Tensor, l: int, 
     insert_masks = torch.cat([torch.zeros_like(spike_mask).int()[:, :2], insert_masks], dim=1) # operate on 'data'
     return insert_masks
 
-def infer_valid_masks(timestamps: torch.Tensor, start_ts: Optional[torch.Tensor] = None, t_search: Optional[Union[int, torch.Tensor]] = None): 
+def infer_valid_masks(timestamps: torch.Tensor, start_ts: Optional[torch.Tensor] = None, t_search: Optional[Union[int, torch.Tensor]] = None, end_ts: Optional[torch.Tensor] = None): 
     
     if start_ts is None and t_search is None: 
         return torch.ones_like(timestamps, dtype=torch.int)
@@ -95,7 +95,10 @@ def infer_valid_masks(timestamps: torch.Tensor, start_ts: Optional[torch.Tensor]
     if t_search is None: 
         t_search = 1e9
 
-    end_ts = start_ts + t_search
+    if end_ts is None: 
+        end_ts = start_ts + t_search
+    else: 
+        end_ts = torch.minimum(end_ts, start_ts + t_search)
 
     valid_masks = (timestamps < end_ts.unsqueeze(1)) & (timestamps >= start_ts.unsqueeze(1))
     valid_masks = torch.roll(valid_masks, shifts=1, dims=1).int()
@@ -174,5 +177,5 @@ def group_mean(values: torch.Tensor, indices: torch.Tensor):
     output = {} 
     for g, mean in zip(unique_groups, group_means): 
         output[g.item()] = mean
-        
+
     return output

@@ -11,28 +11,32 @@ class SORLConfig:
     n: int # number of candidates to rollout 
     temperature: float 
     steps: int  # steps for chunk-wise denoise
-    abstract_budget: int # max number of spiky abstraction allowed
+    max_t_search: Optional[int] = None # max number of tokens to search for abstraction
+    start_ts: Optional[torch.Tensor] = None # start timestamp for adding placeholders | one for each sample
+    end_ts: Optional[torch.Tensor] = None # end timestamp for adding placeholders | one for each sample
+    abstract_budget: int = 5 # max number of spiky abstraction allowed
     use_rhythmic_placeholders: bool = True # whether to use rhythmic placeholders
     use_spike_placeholders: bool = True # whether to use spike placeholders
+    causal_rollout: bool = False # whether to use causal rollout
 
 
 # Placeholder addition function (for parallel search & training)
 # -----------------------------------------------------------------------------------------------------
-def add_rhythmic_placeholders(model: GAT, idx: torch.Tensor, l: int, t_search: Optional[Union[int, torch.Tensor]] = None, start_ts: Optional[torch.Tensor] = None): 
+def add_rhythmic_placeholders(model: GAT, idx: torch.Tensor, l: int, t_search: Optional[Union[int, torch.Tensor]] = None, start_ts: Optional[torch.Tensor] = None, end_ts: Optional[torch.Tensor] = None): 
     
     tokens = deepcopy(idx)
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
     timestamps = infer_timestamp(levels, model.K, l)
     insert_masks = infer_rythmic_insertion_mask(levels, timestamps, model.K, l)
 
-    valid_masks = infer_valid_masks(timestamps, start_ts, t_search)
+    valid_masks = infer_valid_masks(timestamps, start_ts, t_search, end_ts)
     insert_masks *= valid_masks
 
     tokens = insert_tokens(tokens, insert_masks.int(), model.level_mask_tokens[l], model.level_mask_tokens[0])
 
     return tokens
     
-def add_spike_placeholders(model: GAT, data: torch.Tensor, l: int, abstract_budget: int, t_search: Optional[Union[int, torch.Tensor]] = None, start_ts: Optional[torch.Tensor] = None): 
+def add_spike_placeholders(model: GAT, data: torch.Tensor, l: int, abstract_budget: int, t_search: Optional[Union[int, torch.Tensor]] = None, start_ts: Optional[torch.Tensor] = None, end_ts: Optional[torch.Tensor] = None): 
 
     tokens = deepcopy(data)
     idx = tokens[:, :-1].contiguous()
@@ -44,7 +48,7 @@ def add_spike_placeholders(model: GAT, data: torch.Tensor, l: int, abstract_budg
     timestamps = infer_timestamp(levels, model.K, l)
     insert_masks = infer_spike_insertion_mask(levels, ppt, l, abstract_budget)
 
-    valid_masks = infer_valid_masks(timestamps, start_ts, t_search)
+    valid_masks = infer_valid_masks(timestamps, start_ts, t_search, end_ts)
     insert_masks *= valid_masks
 
     tokens = insert_tokens(tokens, insert_masks, model.level_mask_tokens[l], model.level_mask_tokens[0])
@@ -56,6 +60,7 @@ def pad_abstract_tokens(tokens: torch.Tensor,
                         l: int,
                         t_search: Optional[Union[int, torch.Tensor]] = None,
                         start_ts: Optional[torch.Tensor] = None, 
+                        end_ts: Optional[torch.Tensor] = None,
                         use_spike_placeholders: bool = False,
                         abstract_budget: Optional[int] = None,
                         use_rhythmic_placeholders: bool = False):
@@ -64,10 +69,10 @@ def pad_abstract_tokens(tokens: torch.Tensor,
         assert abstract_budget is not None, "abstract_budgets must be provided for spike placeholders"
 
     if use_spike_placeholders:
-        batch_data = add_spike_placeholders(gat, tokens, l, abstract_budget, t_search, start_ts)
+        batch_data = add_spike_placeholders(gat, tokens, l, abstract_budget, t_search, start_ts, end_ts)
 
     if use_rhythmic_placeholders:
-        batch_data = add_rhythmic_placeholders(gat, tokens, l, t_search, start_ts)
+        batch_data = add_rhythmic_placeholders(gat, tokens, l, t_search, start_ts, end_ts)
 
     return batch_data
 
@@ -114,28 +119,73 @@ def chunk_denoise(data: torch.Tensor, model: GAT, l: int, steps: int,
 
     return tokens
 
-def generate_rollout_data(data: torch.Tensor, model: GAT, l: int, 
+def heuristic_rollout(data: torch.Tensor, model: GAT, l: int, 
                           n: int, temperature: float,
                           steps: int, max_t_search: Optional[int] = None,
-                          t_search: Optional[int] = None, start_ts: Optional[int] = None, use_spike_placeholders: bool = True,
-                          abstract_budget: Optional[int] = 5, use_rhythmic_placeholders: bool = True):
-    # Generate Rollout Data 
+                          start_ts: Optional[torch.Tensor] = None, end_ts: Optional[torch.Tensor] = None, 
+                          use_spike_placeholders: bool = True, abstract_budget: Optional[int] = 5, use_rhythmic_placeholders: bool = True):
+    """Heuristic-based decision on when to generate abstraction"""
+
     data_idx = torch.arange(data.shape[0])
-    # (1). Repeat Data | Need to record indices of repeated data for later selection part 
+
     repeat_data = data.repeat_interleave(n, dim=0)
     repeat_data_idx = data_idx.repeat_interleave(n, dim=0)
-    # (2). Pad abstract placeholders
-    repeat_data = pad_abstract_tokens(repeat_data, model, l, t_search=t_search, start_ts=start_ts, use_spike_placeholders=use_spike_placeholders, abstract_budget=abstract_budget, use_rhythmic_placeholders=use_rhythmic_placeholders)
-    # (3). Denoise 
+
+    repeat_data = pad_abstract_tokens(repeat_data, model, l, t_search=max_t_search, start_ts=start_ts, end_ts=end_ts, use_spike_placeholders=use_spike_placeholders, abstract_budget=abstract_budget, use_rhythmic_placeholders=use_rhythmic_placeholders)
+
     repeat_data = chunk_denoise(repeat_data, model, l, steps=steps, max_t_search=max_t_search, temperature=temperature)
+
     return repeat_data, repeat_data_idx
+
+# Most beautiful way of doing rollout -- no heuristic, no manual placeholders, just model-based decision to maximize 'reward'
+def causal_generate(data: torch.Tensor, model: GAT, temperature: float = 0.0): 
+    """Model-based decision on when to generate abstraction"""
+
+    kv_cache, levels = None, None
+
+    progress_idx = torch.zeros(data.size(0), dtype=torch.long)
+    current_idx = data[torch.arange(data.size(0)), progress_idx].contiguous()
+
+    new_data = current_idx.unsqueeze(1)
+
+    while torch.any(progress_idx < data.size(1) - 2): 
+
+        next_idx, kv_cache, levels = model.generate(current_idx.unsqueeze(1), temperature=temperature, kv_cache=kv_cache, levels=levels)
+        next_level = infer_level(next_idx, model.vocab_sizes, model.level_mask_tokens[0])
+
+        traj_mask = next_level == 0
+        
+        current_idx = next_idx
+        
+        if torch.any(traj_mask):
+            gt_tokens = data[torch.arange(data.size(0)), progress_idx + 1]
+            current_idx[traj_mask] = gt_tokens[traj_mask]
+        
+        progress_idx += traj_mask.long()
+
+        new_data = torch.cat([new_data, current_idx.unsqueeze(1)], dim=1)
+
+    return new_data
+
+
+def causal_rollout(data: torch.Tensor, model: GAT, temperature: float, n: int):
+    """The simplificty of this procedure speaks for itself"""
+    repeat_data = data.repeat_interleave(n, dim=0)
+    repeat_data_idx = torch.arange(data.shape[0]).repeat_interleave(n, dim=0)
+    repeat_data = causal_generate(repeat_data, model, temperature)
+    return repeat_data, repeat_data_idx
+
 
 def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig): 
 
     # greedy-involved rollout
     assert config.n > 1, "n must be greater than 1"
-    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
-    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+    if config.causal_rollout:
+        greedy_data, greedy_data_idx = causal_rollout(data, model, temperature=0., n=1)
+        search_data, search_data_idx = causal_rollout(data, model, temperature=config.temperature, n=config.n-1)
+    else:
+        greedy_data, greedy_data_idx = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        search_data, search_data_idx = heuristic_rollout(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
     combined_data = torch.cat([greedy_data, search_data], dim=0)
     combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
@@ -158,17 +208,16 @@ def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor):
     level_loss.update(group_mean(ppt, levels[:, 1:]))
     return level_loss
 
-
 # Sub-optimal way of evaluating search improvement || We'd like to have "evaluate" function that properly does token-by-token generation
 # ---------------------------------------------------------------------------------------------------------------------------------------
 
-# This is slightly un-fair, as the spike placeholder relies on perplexity pattern of the sequence
 def eval_gat(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
-
+    """Causal rollout do not assume full trajectory to add abstraction, it instead perform causal generation, suited for evaluation"""
+    
     with torch.no_grad():        
         assert n > 1, "n must be greater than 1"
-        greedy_data, _ = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
-        search_data, _ = generate_rollout_data(data, model, l=config.l, n=n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        greedy_data, _ = causal_rollout(data, model, temperature=0., n=1, max_t_search=config.max_t_search)
+        search_data, _ = causal_rollout(data, model, temperature=100., n=n-1, max_t_search=config.max_t_search)
 
         greedy_ppt = model(greedy_data[:, :-1].contiguous(), greedy_data[:, 1:].contiguous())
         search_ppt = model(search_data[:, :-1].contiguous(), search_data[:, 1:].contiguous())
