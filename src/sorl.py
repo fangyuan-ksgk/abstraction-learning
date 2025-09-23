@@ -134,8 +134,8 @@ def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig):
 
     # greedy-involved rollout
     assert config.n > 1, "n must be greater than 1"
-    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps)
-    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps)
+    greedy_data, greedy_data_idx = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+    search_data, search_data_idx = generate_rollout_data(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
     combined_data = torch.cat([greedy_data, search_data], dim=0)
     combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
@@ -157,3 +157,25 @@ def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor):
     level_loss = {l: torch.tensor(0.) for l in range(model.L)}
     level_loss.update(group_mean(ppt, levels[:, 1:]))
     return level_loss
+
+
+# Sub-optimal way of evaluating search improvement || We'd like to have "evaluate" function that properly does token-by-token generation
+# ---------------------------------------------------------------------------------------------------------------------------------------
+
+# This is slightly un-fair, as the spike placeholder relies on perplexity pattern of the sequence
+def eval_gat(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
+
+    with torch.no_grad():        
+        assert n > 1, "n must be greater than 1"
+        greedy_data, _ = generate_rollout_data(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        search_data, _ = generate_rollout_data(data, model, l=config.l, n=n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, t_search=config.t_search, start_ts=config.start_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+
+        greedy_ppt = model(greedy_data[:, :-1].contiguous(), greedy_data[:, 1:].contiguous())
+        search_ppt = model(search_data[:, :-1].contiguous(), search_data[:, 1:].contiguous())
+
+    greedy_ppl = compute_loss(greedy_data, model, greedy_ppt)[0]
+    search_ppl = compute_loss(search_data, model, search_ppt)[0]
+
+    improve_ppl_percentage = (search_ppl - greedy_ppl) / search_ppl # percentage of improvement in ppl
+
+    return greedy_ppl, improve_ppl_percentage.mean() * 100
