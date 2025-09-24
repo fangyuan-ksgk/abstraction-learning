@@ -12,7 +12,7 @@ class SORLConfig:
     n: int # number of candidates to rollout 
     temperature: float 
     
-    causal_rollout: bool # whether to use causal rollout
+    causal_rollout: bool = False # whether to use causal rollout
     budget: Optional[int] = None # max number of abstract tokens allowed
 
     # parameter used if not causal rollout
@@ -167,6 +167,7 @@ def heuristic_rollout(data: torch.Tensor, model: GAT, l: int,
 # Most beautiful way of doing rollout -- no heuristic, no manual placeholders, just model-based decision to maximize 'reward'
 # - Issue: don't know when to stop (could generate abstraction forever)
 def causal_generate(data: torch.Tensor, model: GAT, temperature: float, budget: int): 
+    raise NotImplementedError("Causal generation is not ALLOWED!")
     """Model-based decision on when to generate abstraction"""
 
     pad_token_id = model.level_mask_tokens[0]   
@@ -262,12 +263,8 @@ def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig):
     # greedy-involved rollout
     assert config.n > 1, "n must be greater than 1"
     with torch.no_grad(): 
-        if config.causal_rollout:
-            greedy_data, greedy_data_idx = causal_rollout(data, model, temperature=0., n=1, budget=config.budget)
-            search_data, search_data_idx = causal_rollout(data, model, temperature=config.temperature, n=config.n-1, budget=config.budget)
-        else:
-            greedy_data, greedy_data_idx = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
-            search_data, search_data_idx = heuristic_rollout(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        greedy_data, greedy_data_idx = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        search_data, search_data_idx = heuristic_rollout(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
     combined_data, combined_data_idx = combine_rollout(greedy_data, greedy_data_idx, search_data, search_data_idx, model.level_mask_tokens[0])
 
