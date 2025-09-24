@@ -50,12 +50,16 @@ traj_vocab_size = train_dataset.vocab_size_list[0]
 
 gat_config = GATConfig(K=3, L=2, n_embd=128, n_head=4, n_layer=4, 
                        device="cuda" if torch.cuda.is_available() else "cpu", 
-                       _compile=True if torch.cuda.is_available() else False,
+                       _compile=False, # not compatible with search curriculum / varying attention pattern
                        vocab_size_list=[traj_vocab_size, 8], memory_span=sorl_config.max_seq_len)
 
 gat = GAT(gat_config)
 
 gat.to(gat.device)
+
+if torch.cuda.is_available(): 
+   gat = torch.compile(gat, dynamic=True)
+
 
 if __name__ == "__main__":
 
