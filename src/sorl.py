@@ -145,7 +145,7 @@ def heuristic_rollout(data: torch.Tensor, model: GAT, l: int,
                           use_spike_placeholders: bool = True, abstract_budget: Optional[int] = 5, use_rhythmic_placeholders: bool = True):
     """Heuristic-based decision on when to generate abstraction"""
 
-    data_idx = torch.arange(data.shape[0])
+    data_idx = torch.arange(data.shape[0], device=data.device)
 
     repeat_data = data.repeat_interleave(n, dim=0)
     repeat_data_idx = data_idx.repeat_interleave(n, dim=0)
@@ -181,7 +181,7 @@ def causal_generate(data: torch.Tensor, model: GAT, temperature: float, budget: 
        
         if torch.any(effective_traj_mask):
             safe_indices = torch.clamp(progress_idx + 1, max=data.size(1) - 1)
-            gt_tokens = data[torch.arange(data.size(0)), safe_indices]
+            gt_tokens = data[torch.arange(data.size(0), device=data.device), safe_indices]
             current_idx[effective_traj_mask] = gt_tokens[effective_traj_mask]
         
         progress_idx += effective_traj_mask.long()
@@ -244,7 +244,7 @@ def causal_generate(data: torch.Tensor, model: GAT, temperature: float, budget: 
 def causal_rollout(data: torch.Tensor, model: GAT, temperature: float, n: int, budget: int):
     """The simplificty of this procedure speaks for itself"""
     repeat_data = data.repeat_interleave(n, dim=0)
-    repeat_data_idx = torch.arange(data.shape[0]).repeat_interleave(n, dim=0)
+    repeat_data_idx = torch.arange(data.shape[0], device=data.device).repeat_interleave(n, dim=0)
     repeat_data = causal_generate(repeat_data, model, temperature, budget)
     return repeat_data, repeat_data_idx
 
