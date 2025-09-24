@@ -10,17 +10,26 @@ import torch
 
 # SoRL config 
 sorl_config = SORLConfig(
+
     n = 3,
-    temperature = 1.0,   
+    temperature = 0.75,   
     # rollout specific 
     causal_rollout=False, 
     
     l=1,
-    steps=3,
+    steps=1,
     use_rhythmic_placeholders=True,
-    use_spike_placeholders=False,
+    use_spike_placeholders=True,
     abstract_budget=5,
-    max_t_search=5, # specific for arithmetic dataset
+    max_t_search=5,
+
+    # curriculum progress rate
+    curriculum_ratio=0.6,
+
+    # memory fading
+    max_seq_len = 17,
+    use_fade_memory=True,
+    min_keep=6,
 
     # dataset specific
     train_dataset_path="dataset/multiplication/100K-123.bin",
@@ -42,9 +51,11 @@ traj_vocab_size = train_dataset.vocab_size_list[0]
 gat_config = GATConfig(K=3, L=2, n_embd=128, n_head=4, n_layer=4, 
                        device="cuda" if torch.cuda.is_available() else "cpu", 
                        _compile=True if torch.cuda.is_available() else False,
-                       vocab_size_list=[traj_vocab_size, 8], t_keep=sorl_config.max_length)
+                       vocab_size_list=[traj_vocab_size, 8], memory_span=sorl_config.max_seq_len)
 
 gat = GAT(gat_config)
+
+gat.to(gat.device)
 
 if __name__ == "__main__":
 
@@ -65,6 +76,10 @@ if __name__ == "__main__":
     parser.add_argument("--val_iterations", type=int, default=100)
     parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
+    parser.add_argument("--curriculum_ratio", type=float, default=0.6)
+    parser.add_argument("--use_fade_memory", type=bool, default=True)
+    parser.add_argument("--min_keep", type=int, default=6)
+    parser.add_argument("--max_seq_len", type=int, default=17)
     parser.add_argument("--train_dataset_path", type=str, default="dataset/multiplication/100K-123.bin")
     parser.add_argument("--val_dataset_path", type=str, default="dataset/multiplication/2K-123.bin")
     args = parser.parse_args()
