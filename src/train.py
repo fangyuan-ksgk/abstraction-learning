@@ -89,7 +89,7 @@ def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_datas
                 f"{wandb_log_prefix}/train/abstraction_switch_ratio": switch_ratio, # how often greedy sampled abstraction is rejected for other abstraction
                 f"{wandb_log_prefix}/val(in-domain)/improve_ppl_percentage": validate_improve_ppl.item(), 
                 f"{wandb_log_prefix}/val(in-domain)/traj_ppl": validate_traj_ppl.item(), 
-                f"{wandb_log_prefix}/val(in-domain)/vocab_utilization_rate": validate_vocab_utilization_rate.item(), 
+                f"{wandb_log_prefix}/val(in-domain)/vocab_utilization_rate": validate_vocab_utilization_rate, 
 
                 f"{wandb_log_prefix}/progress/iteration": global_step, 
                 f"{wandb_log_prefix}/progress/t_search": t_search, 
