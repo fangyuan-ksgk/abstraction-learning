@@ -9,39 +9,58 @@
 import wandb, torch
 from dataset.base import BaseDataset
 from src.gat import GAT
-from src.sorl import SORLConfig, sorl_search, compute_loss
+from src.sorl import SORLConfig, sorl_search, compute_loss, evaluate, SearchScheduler
+from dataset.base import get_batch
+
+
+# Validation loop
+# ------------------------------------------------------------------------------------------------
+def validate(val_dataset: BaseDataset, gat: GAT,  config: SORLConfig): 
+
+    total_improve_ppl = 0.0
+    total_traj_ppl = 0.0
+
+    num_iterations = max(1, config.val_iterations)
+    for _ in range(num_iterations): 
+        val_data = get_batch(val_dataset, config.val_batch_size, config.max_length, gat.level_mask_tokens[0], device=gat.device)
+        with torch.no_grad(): 
+            improve_ppl, traj_ppl, greedy_str, vocab_utilization_rate = evaluate(val_data, gat, 5, config)
+            total_improve_ppl += improve_ppl
+            total_traj_ppl += traj_ppl
+        del val_data
+
+    avg_improve_ppl = total_improve_ppl / num_iterations
+    avg_traj_ppl = total_traj_ppl / num_iterations
+    return avg_improve_ppl, avg_traj_ppl, greedy_str, vocab_utilization_rate
 
 
 # Self organizing reinforcement learning (SoRL)
 # ------------------------------------------------------------------------------------------------
-def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset: BaseDataset, gat: GAT, config: SORLConfig, start_step: int = 0, wandb_log_prefix: str = None): 
-    
-    if config.t_curriculum: 
-        t_search = 0
-        t_delta, t_max = compute_curriculum_t_increment(num_iterations=config.num_iterations, context_length=config.context_length, K=gat.K, max_ts=max(dataset.lengths))
-    else: 
-        t_search, t_delta, t_max = config.context_length, 0, 0
+def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_dataset: BaseDataset, gat: GAT, config: SORLConfig, start_step: int = 0, wandb_log_prefix: str = None): 
     
     optimizer = torch.optim.Adam(gat.parameters(), lr=config.learning_rate)
+    scheduler = SearchScheduler(config, gat.K, curriculum_ratio=0.5)
 
-    for i in range(config.num_iterations):
+    for i in range(config.train_iterations):
+        # config.temperature = 0.0 if i % 2 == 0 else 1.0
         global_step = start_step + i
         gat.train() 
 
-        batch_data = get_batch(dataset.sequences, dataset.lengths, config.context_length // config.n_generations, gat.L, gat.K, device=gat.device)
+        t_search = scheduler.step()
+        config.max_t_search = t_search
+
+        data = get_batch(train_dataset, config.train_batch_size, config.max_length, gat.level_mask_tokens[0], device=gat.device)
 
         with torch.no_grad(): 
-    
-            repeat_batch, switch_ratio, rollout_advantages = sorl_search(gat, batch_data, config.n_generations, config.temperature, t_search)
+
+            search_data, switch_ratio = sorl_search(data, gat, config)
             
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
+        ppt = gat(search_data[:, :-1].contiguous(), target=search_data[:, 1:].contiguous())
 
-        ppt = gat(repeat_batch)
-
-        level_loss = compute_loss(repeat_batch, gat, ppt)
-        ssl_loss, abs_loss = level_loss[0], level_loss[config.l]
+        ssl_loss, abs_loss = compute_loss(search_data, gat, ppt)
         loss = abs_loss + ssl_loss
 
         optimizer.zero_grad()
@@ -52,15 +71,14 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
             torch.cuda.empty_cache()
 
         if global_step % config.log_interval == 0 and global_step > 0 and wandb_log_prefix:
-
+            
             # Validation needs to be more rigorous : more samples
             gat.eval()
 
             with torch.no_grad(): 
-                improve_ppl_train = eval_search_improvement(gat, batch_data, t_search=t_search)
-                improve_ppl_val, traj_ppl_val, info_str = evaluate_gat(gat, id_val_dataset, config, t_search, t_max)
+                _, improve_ppl_train, _, _ = evaluate(data, gat, 5, config)
+                validate_improve_ppl, validate_traj_ppl, validate_greedy_str, validate_vocab_utilization_rate = validate(val_dataset, gat, config)
 
-            wandb.log({f"{wandb_log_prefix}/val/info_str": wandb.Table(columns=["info"], data=[[info_str]])}, step=global_step)
             
             wandb.log({
                 f"{wandb_log_prefix}/train/loss": loss.item(), 
@@ -69,25 +87,20 @@ def sorl_gat(dataset: BaseDataset, id_val_dataset: BaseDataset, ood_val_dataset:
 
                 f"{wandb_log_prefix}/train/improve_ppl_percentage": improve_ppl_train.item(), 
                 f"{wandb_log_prefix}/train/abstraction_switch_ratio": switch_ratio, # how often greedy sampled abstraction is rejected for other abstraction
-                f"{wandb_log_prefix}/train/mean_rollout_advantages": rollout_advantages.mean().item(), # average advantage over greedy choice
-                f"{wandb_log_prefix}/train/max_rollout_advantages": rollout_advantages.max().item(), # max advantage over greedy choice
-                f"{wandb_log_prefix}/val(in-domain)/improve_ppl_percentage": improve_ppl_val.item(), 
+                f"{wandb_log_prefix}/val(in-domain)/improve_ppl_percentage": validate_improve_ppl.item(), 
+                f"{wandb_log_prefix}/val(in-domain)/traj_ppl": validate_traj_ppl.item(), 
+                f"{wandb_log_prefix}/val(in-domain)/vocab_utilization_rate": validate_vocab_utilization_rate.item(), 
 
                 f"{wandb_log_prefix}/progress/iteration": global_step, 
-                f"{wandb_log_prefix}/progress/t_search": t_search,
+                f"{wandb_log_prefix}/progress/t_search": t_search, 
             }, step=global_step)
 
-            del val_data
             gat.train()
 
-            if traj_ppl_val > 0.0: 
-                wandb.log({f"{wandb_log_prefix}/val(in-domain)/traj_ppl": traj_ppl_val.mean().item()}, step=global_step)
-   
-        print(f"Iteration {i+1}/{config.num_iterations} "
-                    f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}")
-        
-        t_search = min(t_search + t_delta, t_max)
+        print(f"Iteration {i+1}/{config.train_iterations} "
+                            f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}")
+
 
         del loss, abs_loss, ssl_loss, ppt
 
-    return gat, start_step + config.num_iterations
+    return gat, start_step + config.train_iterations

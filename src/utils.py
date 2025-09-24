@@ -179,3 +179,21 @@ def group_mean(values: torch.Tensor, indices: torch.Tensor):
         output[g.item()] = mean
 
     return output
+
+def compute_switch_ratio(idx_max: torch.Tensor, n_greedy_samples: int):
+    n_switched = (idx_max >= n_greedy_samples).sum().item()
+    switch_ratio = n_switched / n_greedy_samples
+    return switch_ratio
+
+def combine_rollout(greedy_data: torch.Tensor, greedy_data_idx: torch.Tensor, search_data: torch.Tensor, search_data_idx: torch.Tensor, pad_token_id: int):
+    max_len = max(greedy_data.size(1), search_data.size(1))
+    greedy_padded = torch.nn.functional.pad(
+        greedy_data, (0, max_len - greedy_data.size(1)), value=pad_token_id
+    )
+    search_padded = torch.nn.functional.pad(
+        search_data, (0, max_len - search_data.size(1)), value=pad_token_id
+    )
+    combined_data = torch.cat([greedy_padded, search_padded], dim=0)
+    combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
+    return combined_data, combined_data_idx
+

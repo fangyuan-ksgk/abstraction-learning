@@ -80,7 +80,7 @@ class GAT(nn.Module):
 
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), reduction="none")
         loss = loss.view(idx.shape[0], idx.shape[1])
-        loss[torch.isin(target, self.level_mask_tokens)] = 0 # ignore loss for mask tokens
+        loss[torch.isin(target, self.level_mask_tokens)] = 0 # ignore loss for mask & pad tokens
         return loss
 
 

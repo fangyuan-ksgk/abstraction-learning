@@ -1,23 +1,42 @@
 from src.gat import GAT
-from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks, group_argmax, group_mean
+from src.utils import infer_level, infer_timestamp, infer_rythmic_insertion_mask, insert_tokens, infer_spike_insertion_mask, infer_valid_masks, group_argmax, group_mean, compute_switch_ratio, combine_rollout
 from copy import deepcopy
 import torch
 from typing import Optional, Union 
 from dataclasses import dataclass
+from torch.nn.utils.rnn import pad_sequence
+
 
 @dataclass 
 class SORLConfig: 
-    l: int # level of abstraction to search & learn
     n: int # number of candidates to rollout 
     temperature: float 
-    steps: int  # steps for chunk-wise denoise
+    
+    causal_rollout: bool # whether to use causal rollout
+    budget: Optional[int] = None # max number of abstract tokens allowed
+
+    # parameter used if not causal rollout
+    l: Optional[int] = None # level of abstraction to search & learn
+    steps: Optional[int] = None # steps for chunk-wise denoise
     max_t_search: Optional[int] = None # max number of tokens to search for abstraction
     start_ts: Optional[torch.Tensor] = None # start timestamp for adding placeholders | one for each sample
     end_ts: Optional[torch.Tensor] = None # end timestamp for adding placeholders | one for each sample
     abstract_budget: int = 5 # max number of spiky abstraction allowed
     use_rhythmic_placeholders: bool = True # whether to use rhythmic placeholders
     use_spike_placeholders: bool = True # whether to use spike placeholders
-    causal_rollout: bool = False # whether to use causal rollout
+
+    # dataset specific
+    train_dataset_path: Optional[str] = None
+    val_dataset_path: Optional[str] = None
+    train_batch_size: int = 128
+    val_batch_size: int = 128
+    train_iterations: int = 1000
+    val_iterations: int = 10
+    max_length: int = 1024
+
+    # optimization specific 
+    learning_rate: float = 1e-3
+    log_interval: int = 100
 
 
 # Placeholder addition function (for parallel search & training)
@@ -85,7 +104,7 @@ def repad_abstract_tokens(tokens: torch.Tensor, model: GAT, l: int, start_ts: to
 
 def prep_denoise(tokens: torch.Tensor, model: GAT):
     levels = infer_level(tokens, model.vocab_sizes, model.level_mask_tokens[0])
-    denoise_mask = torch.isin(tokens, model.level_mask_tokens)
+    denoise_mask = torch.isin(tokens, model.level_mask_tokens[1:])
     denoise_levels = levels[denoise_mask]
     return denoise_mask, denoise_levels
 
@@ -138,7 +157,8 @@ def heuristic_rollout(data: torch.Tensor, model: GAT, l: int,
     return repeat_data, repeat_data_idx
 
 # Most beautiful way of doing rollout -- no heuristic, no manual placeholders, just model-based decision to maximize 'reward'
-def causal_generate(data: torch.Tensor, model: GAT, temperature: float): 
+# - Issue: don't know when to stop (could generate abstraction forever)
+def causal_generate(data: torch.Tensor, model: GAT, temperature: float, budget: int): 
     """Model-based decision on when to generate abstraction"""
 
     pad_token_id = model.level_mask_tokens[0]   
@@ -147,6 +167,7 @@ def causal_generate(data: torch.Tensor, model: GAT, temperature: float):
     current_idx = data[torch.arange(data.size(0)), progress_idx].contiguous()
 
     new_data = current_idx.unsqueeze(1)
+    abstract_tokens_used = torch.zeros(data.size(0), dtype=torch.long, device=data.device)
 
     while torch.any(progress_idx < data.size(1) - 1): 
 
@@ -155,9 +176,9 @@ def causal_generate(data: torch.Tensor, model: GAT, temperature: float):
         next_level = infer_level(next_idx, model.vocab_sizes, model.level_mask_tokens[0])
         traj_mask = (next_level == 0)
         effective_traj_mask = traj_mask & not_finished_mask
-        
+
         current_idx = next_idx
-        
+       
         if torch.any(effective_traj_mask):
             safe_indices = torch.clamp(progress_idx + 1, max=data.size(1) - 1)
             gt_tokens = data[torch.arange(data.size(0)), safe_indices]
@@ -171,11 +192,60 @@ def causal_generate(data: torch.Tensor, model: GAT, temperature: float):
     return new_data
 
 
-def causal_rollout(data: torch.Tensor, model: GAT, temperature: float, n: int):
+# def causal_generate(data: torch.Tensor, model: GAT, temperature: float, budget: int): 
+#     """Model-based decision on when to generate abstraction"""
+
+#     pad_token_id = model.level_mask_tokens[0]   
+#     kv_cache, levels = None, None
+#     progress_idx = torch.zeros(data.size(0), dtype=torch.long)
+#     current_idx = data[torch.arange(data.size(0)), progress_idx].contiguous()
+
+#     new_data = current_idx.unsqueeze(1)
+    
+#     abstract_tokens_used = torch.zeros(data.size(0), dtype=torch.long, device=data.device)
+
+#     while torch.any(progress_idx < data.size(1) - 1): 
+
+#         not_finished_mask = progress_idx < data.size(1) - 1
+#         next_idx, kv_cache, levels = model.generate(current_idx.unsqueeze(1), temperature=temperature, kv_cache=kv_cache, levels=levels)
+#         next_level = infer_level(next_idx, model.vocab_sizes, model.level_mask_tokens[0])
+        
+#         abstract_mask = (next_level > 0) & not_finished_mask
+        
+#         budget_exceeded_mask = (abstract_tokens_used >= budget) & abstract_mask
+        
+#         traj_mask = (next_level == 0) | budget_exceeded_mask
+#         effective_traj_mask = traj_mask & not_finished_mask
+
+#         actual_abstract_mask = (next_level > 0) & not_finished_mask & ~budget_exceeded_mask
+#         abstract_tokens_used += actual_abstract_mask.long()
+
+#         current_idx = next_idx
+        
+#         if torch.any(budget_exceeded_mask):
+#             safe_indices = torch.clamp(progress_idx + 1, max=data.size(1) - 1)
+#             gt_tokens = data[torch.arange(data.size(0)), safe_indices]
+#             current_idx[budget_exceeded_mask] = gt_tokens[budget_exceeded_mask]
+#             effective_traj_mask = effective_traj_mask | budget_exceeded_mask
+       
+#         if torch.any(effective_traj_mask):
+#             safe_indices = torch.clamp(progress_idx + 1, max=data.size(1) - 1)
+#             gt_tokens = data[torch.arange(data.size(0)), safe_indices]
+#             current_idx[effective_traj_mask] = gt_tokens[effective_traj_mask]
+        
+#         progress_idx += effective_traj_mask.long()
+#         next_column_to_append = torch.full_like(current_idx, fill_value=pad_token_id)
+#         next_column_to_append[not_finished_mask] = current_idx[not_finished_mask]
+#         new_data = torch.cat([new_data, next_column_to_append.unsqueeze(1)], dim=1)
+
+#     return new_data
+
+
+def causal_rollout(data: torch.Tensor, model: GAT, temperature: float, n: int, budget: int):
     """The simplificty of this procedure speaks for itself"""
     repeat_data = data.repeat_interleave(n, dim=0)
     repeat_data_idx = torch.arange(data.shape[0]).repeat_interleave(n, dim=0)
-    repeat_data = causal_generate(repeat_data, model, temperature)
+    repeat_data = causal_generate(repeat_data, model, temperature, budget)
     return repeat_data, repeat_data_idx
 
 
@@ -183,15 +253,15 @@ def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig):
 
     # greedy-involved rollout
     assert config.n > 1, "n must be greater than 1"
-    if config.causal_rollout:
-        greedy_data, greedy_data_idx = causal_rollout(data, model, temperature=0., n=1)
-        search_data, search_data_idx = causal_rollout(data, model, temperature=config.temperature, n=config.n-1)
-    else:
-        greedy_data, greedy_data_idx = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
-        search_data, search_data_idx = heuristic_rollout(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+    with torch.no_grad(): 
+        if config.causal_rollout:
+            greedy_data, greedy_data_idx = causal_rollout(data, model, temperature=0., n=1, budget=config.budget)
+            search_data, search_data_idx = causal_rollout(data, model, temperature=config.temperature, n=config.n-1, budget=config.budget)
+        else:
+            greedy_data, greedy_data_idx = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+            search_data, search_data_idx = heuristic_rollout(data, model, l=config.l, n=config.n-1, temperature=config.temperature, steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
-    combined_data = torch.cat([greedy_data, search_data], dim=0)
-    combined_data_idx = torch.cat([greedy_data_idx, search_data_idx], dim=0)
+    combined_data, combined_data_idx = combine_rollout(greedy_data, greedy_data_idx, search_data, search_data_idx, model.level_mask_tokens[0])
 
     with torch.no_grad():
         ppt = model(idx = combined_data[:, :-1].contiguous(), 
@@ -201,7 +271,9 @@ def sorl_search(data: torch.Tensor, model: GAT, config: SORLConfig):
     idx_max = group_argmax(ppt.mean(axis=1), combined_data_idx)
     best_data = combined_data[idx_max]
 
-    return best_data
+    switch_ratio = compute_switch_ratio(idx_max, data.size(0))
+
+    return best_data, switch_ratio
 
 # loss computation (level-0 is trajectory loss, level >= 1 is abstract loss)
 # ------------------------------------------------------------------------------------------------
@@ -209,25 +281,46 @@ def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor):
     levels = infer_level(data, model.vocab_sizes, model.level_mask_tokens[0])
     level_loss = {l: torch.tensor(0.) for l in range(model.L)}
     level_loss.update(group_mean(ppt, levels[:, 1:]))
-    return level_loss
+    return level_loss[0], sum(level_loss[l] for l in level_loss if l > 0)
 
 # Sub-optimal way of evaluating search improvement || We'd like to have "evaluate" function that properly does token-by-token generation
 # ---------------------------------------------------------------------------------------------------------------------------------------
 
-def eval_gat(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
+def evaluate(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
     """Causal rollout do not assume full trajectory to add abstraction, it instead perform causal generation, suited for evaluation"""
 
     with torch.no_grad():        
         assert n > 1, "n must be greater than 1"
-        greedy_data, _ = causal_rollout(data, model, temperature=0., n=1, max_t_search=config.max_t_search)
-        search_data, _ = causal_rollout(data, model, temperature=100., n=n-1, max_t_search=config.max_t_search)
+        if config.causal_rollout:
+            greedy_data, _ = causal_rollout(data, model, temperature=0., n=1, budget=config.budget)
+            search_data, _ = causal_rollout(data, model, temperature=100., n=n-1, budget=config.budget)
+        else: 
+            greedy_data, _ = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+            search_data, _ = heuristic_rollout(data, model, l=config.l, n=n-1, temperature=100., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
         greedy_ppt = model(greedy_data[:, :-1].contiguous(), greedy_data[:, 1:].contiguous())
         search_ppt = model(search_data[:, :-1].contiguous(), search_data[:, 1:].contiguous())
 
-    greedy_ppl = compute_loss(greedy_data, model, greedy_ppt)[0]
-    search_ppl = compute_loss(search_data, model, search_ppt)[0]
+        greedy_ppl = compute_loss(greedy_data, model, greedy_ppt)[0]
+        search_ppl = compute_loss(search_data, model, search_ppt)[0]
 
     improve_ppl_percentage = (search_ppl - greedy_ppl) / search_ppl # percentage of improvement in ppl
 
-    return greedy_ppl, improve_ppl_percentage.mean() * 100
+    si, ei = model.vocab_sizes.cumsum(dim=0)
+    vocab_utilization_rate = greedy_data[(greedy_data >= si) & (greedy_data < ei)].unique().size(0) / (ei - si).item()
+
+    return greedy_ppl, improve_ppl_percentage.mean() * 100, greedy_data, vocab_utilization_rate
+
+
+
+class SearchScheduler: 
+    def __init__(self, sorl_config: SORLConfig, K: int, curriculum_ratio: float = 0.8): 
+        self.sorl_config = sorl_config
+        self.max_ts = min(sorl_config.max_length // K, sorl_config.max_t_search)
+        self.curriculum_iterations = int(sorl_config.train_iterations * curriculum_ratio)
+        self.t_delta = self.max_ts / self.curriculum_iterations
+        self.t_search = 0 
+
+    def step(self): 
+        self.t_search = min(self.t_search + self.t_delta, self.max_ts)
+        return int(self.t_search)

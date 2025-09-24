@@ -604,3 +604,91 @@ def test_sorl_search():
     model.forward = original_forward
 
 
+
+
+def check_denoise():
+
+    import torch
+    from src.regat import GAT, GATConfig
+    from src.utils import infer_level
+    
+    # 1. Setup a minimal model and configuration
+    config = GATConfig(
+        n_layer=1,
+        n_head=2,
+        n_embd=32,
+        vocab_size_list=[10, 10, 10], # 3 levels, vocab size 10 each
+        L=3,
+        K=4,
+        device='cpu',
+        _compile=False
+    )
+    model = GAT(config)
+
+    # Vocabulary details from the model
+    l1_mask_tok = model.level_mask_tokens[1].item() # Placeholder for level 1
+    l2_mask_tok = model.level_mask_tokens[2].item() # Placeholder for level 2
+
+    # 2. Create a sample input sequence `idx`
+    # We use `0` as a dummy token value that we expect to be replaced.
+    # Placeholders are at:
+    # - Batch 0, Pos 2 (level 1) -> The token at Pos 3 should be replaced
+    # - Batch 0, Pos 5 (level 2) -> The token at Pos 6 should be replaced
+    # - Batch 1, Pos 1 (level 1) -> The token at Pos 2 should be replaced
+    # - Batch 1, Pos 7 (level 2) -> Edge case: last token, should be ignored
+    original_idx = torch.tensor([
+        [1, 5, l1_mask_tok, 0, 2, l2_mask_tok, 0, 3],
+        [4, l1_mask_tok, 0, 6, 8, 3, 1, l2_mask_tok]
+    ], dtype=torch.long, device=config.device)
+
+    # Clone for modification and later comparison
+    test_idx = original_idx.clone()
+
+    # 3. Prepare the inputs for the denoise function
+    denoise_mask = torch.isin(test_idx, model.level_mask_tokens)
+    placeholder_levels = infer_level(test_idx[denoise_mask], model.vocab_sizes, model.level_mask_tokens[0])
+
+    print("--- Input Data ---")
+    print("Original sequence:\n", original_idx)
+    print("Placeholder mask (denoise_mask):\n", denoise_mask)
+    print("Levels of placeholders:\n", placeholder_levels)
+    print("-" * 20)
+
+    # 4. Call the denoise function
+    with torch.no_grad():
+        denoised_idx = model.denoise(test_idx, denoise_mask, placeholder_levels, temperature=0.0)
+
+    print("\n--- Output Data ---")
+    print("Denoised sequence:\n", denoised_idx)
+    print("-" * 20)
+
+    # 5. Assertions and Checks
+    print("\n--- Verification ---")
+
+
+    # Check 2: The tokens at positions to be replaced (originally 0) should now be different
+    assert denoised_idx[0, 2] != 0, "Test Failed: Token at (0, 3) was not replaced."
+    assert denoised_idx[0, 5] != 0, "Test Failed: Token at (0, 6) was not replaced."
+    assert denoised_idx[1, 1] != 0, "Test Failed: Token at (1, 2) was not replaced."
+    print("✅ Pass: Tokens following placeholders were correctly replaced.")
+
+    # Check 3: The values that were replaced should be valid tokens for their respective levels.
+    new_tok_0_2_level = infer_level(denoised_idx[0, 2].unsqueeze(0), model.vocab_sizes, model.level_mask_tokens[0])
+    assert new_tok_0_2_level.item() == 1, f"Test Failed: Token at (0,3) has wrong level {new_tok_0_2_level.item()}, expected 1."
+
+    new_tok_0_5_level = infer_level(denoised_idx[0, 5].unsqueeze(0), model.vocab_sizes, model.level_mask_tokens[0])
+    assert new_tok_0_5_level.item() == 2, f"Test Failed: Token at (0,6) has wrong level {new_tok_0_5_level.item()}, expected 2."
+
+    new_tok_1_1_level = infer_level(denoised_idx[1, 1].unsqueeze(0), model.vocab_sizes, model.level_mask_tokens[0])
+    assert new_tok_1_1_level.item() == 1, f"Test Failed: Token at (1,2) has wrong level {new_tok_1_1_level.item()}, expected 1."
+    print("✅ Pass: Replaced tokens belong to the correct vocabulary level.")
+
+    # Check 4: All other tokens (not placeholders, not replacements) should be unchanged
+    stable_mask = ~torch.isin(original_idx, model.level_mask_tokens)
+    stable_mask[:, [2, 5]] = False
+    stable_mask[1, 1] = False
+
+    assert torch.all(denoised_idx[stable_mask] == original_idx[stable_mask]), \
+        "Test Failed: Other tokens in the sequence were unexpectedly changed."
+    print("✅ Pass: All other tokens remain unchanged.")
+    print("\nSanity check complete. All tests passed!")
