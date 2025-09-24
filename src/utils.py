@@ -148,7 +148,7 @@ def group_argmax(values: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     unique_groups, group_indices = torch.unique(indices, return_inverse=True)
     num_groups = len(unique_groups)
 
-    max_vals = torch.full((num_groups, len(values)), float('-inf'))
+    max_vals = torch.full((num_groups, len(values)), float('-inf'), device=values.device)
     pos_indices = torch.arange(len(values), device=values.device)
 
     max_vals[group_indices, pos_indices] = values

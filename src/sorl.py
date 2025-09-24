@@ -285,6 +285,10 @@ def compute_loss(data: torch.Tensor, model: GAT, ppt: torch.Tensor):
 
 # Sub-optimal way of evaluating search improvement || We'd like to have "evaluate" function that properly does token-by-token generation
 # ---------------------------------------------------------------------------------------------------------------------------------------
+def compute_vocab_utilization_rate(data: torch.Tensor, model: GAT):
+    si, ei = model.vocab_sizes.cumsum(dim=0)
+    return data[(data >= si) & (data < ei)].unique().size(0) / (ei - si).item()
+
 
 def evaluate(data: torch.Tensor, model: GAT, n: int, config: SORLConfig): 
     """Causal rollout do not assume full trajectory to add abstraction, it instead perform causal generation, suited for evaluation"""
@@ -306,8 +310,7 @@ def evaluate(data: torch.Tensor, model: GAT, n: int, config: SORLConfig):
 
     improve_ppl_percentage = (search_ppl - greedy_ppl) / search_ppl # percentage of improvement in ppl
 
-    si, ei = model.vocab_sizes.cumsum(dim=0)
-    vocab_utilization_rate = greedy_data[(greedy_data >= si) & (greedy_data < ei)].unique().size(0) / (ei - si).item()
+    vocab_utilization_rate = compute_vocab_utilization_rate(greedy_data, model)
 
     return greedy_ppl, improve_ppl_percentage.mean() * 100, greedy_data, vocab_utilization_rate
 

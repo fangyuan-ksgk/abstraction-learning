@@ -6,6 +6,7 @@ import argparse
 
 from dataclasses import asdict
 import wandb
+import torch
 
 # SoRL config 
 sorl_config = SORLConfig(
@@ -38,7 +39,9 @@ train_dataset = ArithmeticDataset.from_file(sorl_config.train_dataset_path)
 val_dataset = ArithmeticDataset.from_file(sorl_config.val_dataset_path)
 traj_vocab_size = train_dataset.vocab_size_list[0]
 
-gat_config = GATConfig(K=3, L=2, n_embd=128, n_head=4, n_layer=4, device="cpu", _compile=False,
+gat_config = GATConfig(K=3, L=2, n_embd=128, n_head=4, n_layer=4, 
+                       device="cuda" if torch.cuda.is_available() else "cpu", 
+                       _compile=True if torch.cuda.is_available() else False,
                        vocab_size_list=[traj_vocab_size, 8], t_keep=sorl_config.max_length)
 
 gat = GAT(gat_config)
