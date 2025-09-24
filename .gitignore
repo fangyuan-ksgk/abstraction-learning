@@ -1,2 +1,17 @@
 __pycache__/
 *.pyc
+wandb/*
+dataset/multiplication/*
+dataset/nbody/*
+*.json
+*.pt
+*.gif
+*.csv
+*.txt
+*.log
+*.err
+*.out
+*.err.1
+*.out.1
+*.err.2
+*.out.2
