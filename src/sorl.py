@@ -300,12 +300,9 @@ def evaluate(data: torch.Tensor, model: GAT, n: int, config: SORLConfig):
 
     with torch.no_grad():        
         assert n > 1, "n must be greater than 1"
-        if config.causal_rollout:
-            greedy_data, _ = causal_rollout(data, model, temperature=0., n=1, budget=config.budget)
-            search_data, _ = causal_rollout(data, model, temperature=100., n=n-1, budget=config.budget)
-        else: 
-            greedy_data, _ = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
-            search_data, _ = heuristic_rollout(data, model, l=config.l, n=n-1, temperature=100., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        
+        greedy_data, _ = heuristic_rollout(data, model, l=config.l, n=1, temperature=0., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
+        search_data, _ = heuristic_rollout(data, model, l=config.l, n=n-1, temperature=100., steps=config.steps, max_t_search=config.max_t_search, start_ts=config.start_ts, end_ts=config.end_ts, use_spike_placeholders=config.use_spike_placeholders, abstract_budget=config.abstract_budget, use_rhythmic_placeholders=config.use_rhythmic_placeholders)
 
         greedy_ppt = model(greedy_data[:, :-1].contiguous(), greedy_data[:, 1:].contiguous())
         search_ppt = model(search_data[:, :-1].contiguous(), search_data[:, 1:].contiguous())
