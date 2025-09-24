@@ -39,7 +39,7 @@ def validate(val_dataset: BaseDataset, gat: GAT,  config: SORLConfig):
 def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_dataset: BaseDataset, gat: GAT, config: SORLConfig, start_step: int = 0, wandb_log_prefix: str = None): 
     
     optimizer = torch.optim.Adam(gat.parameters(), lr=config.learning_rate)
-    scheduler = SearchScheduler(config, gat.K, curriculum_ratio=0.5)
+    scheduler = SearchScheduler(config, gat.K)
 
     for i in range(config.train_iterations):
         # config.temperature = 0.0 if i % 2 == 0 else 1.0
@@ -48,6 +48,7 @@ def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_datas
 
         t_search = scheduler.step()
         config.max_t_search = t_search
+        gat.memory_span = scheduler.memory_span # memory fading
 
         data = get_batch(train_dataset, config.train_batch_size, config.max_length, gat.level_mask_tokens[0], device=gat.device)
 
@@ -98,7 +99,7 @@ def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_datas
             gat.train()
 
         print(f"Iteration {i+1}/{config.train_iterations} "
-                            f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}")
+                            f"- loss: {loss.item():.4f}, abs_loss: {abs_loss.item():.4f}, ssl_loss: {ssl_loss.item():.4f}, t_search: {t_search}, memory_span: {gat.memory_span}")
 
 
         del loss, abs_loss, ssl_loss, ppt

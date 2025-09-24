@@ -14,7 +14,7 @@ class GATConfig:
     n_head : int = 6
     n_embd : int = 768
     flex_kernel_options: Optional[dict] = None
-    t_keep : int = 1024 # memory span (for trajectory-level memories)
+    memory_span : int = 1024 # memory span (for trajectory-level memories)
     K: int = 4  # abstraction ratio
     L: int = 4  # total # of levels (including 0-th level)
     vocab_size_list: list = field(default_factory=lambda: [128, 64, 32])
@@ -30,7 +30,7 @@ class GAT(nn.Module):
         self.num_layers = config.n_layer
         self.L = config.L
         self.K = config.K
-        self.t_keep = config.t_keep
+        self.memory_span = config.memory_span # finest memory span
 
         # multi-level vocab specific parameters
         self.vocab_sizes = torch.tensor(config.vocab_size_list, device=config.device) + 1
@@ -57,7 +57,7 @@ class GAT(nn.Module):
             causal_mask = q_idx >= kv_idx
 
             is_higher_level = levels[b, kv_idx] > 0
-            is_recent = (q_idx - kv_idx) <= self.t_keep
+            is_recent = (q_idx - kv_idx) <= self.memory_span
             keep_mask = is_higher_level | is_recent 
             return causal_mask & keep_mask
 
@@ -92,7 +92,7 @@ class GAT(nn.Module):
             causal_mask = q_idx >= kv_idx
             
             is_higher_level = levels[b, kv_idx] > 0
-            is_recent = (q_idx - kv_idx) <= self.t_keep
+            is_recent = (q_idx - kv_idx) <= self.memory_span
             keep_mask = is_higher_level | is_recent 
             return causal_mask & keep_mask
 
@@ -134,7 +134,7 @@ class GAT(nn.Module):
                 current_q_pos = q_idx_val + q_idx
                 
                 is_higher_level = levels[b, kv_idx] > 0
-                is_recent = (current_q_pos - kv_idx) <= self.t_keep
+                is_recent = (current_q_pos - kv_idx) <= self.memory_span
                 keep_mask = is_higher_level | is_recent
                 return keep_mask
             
@@ -151,7 +151,7 @@ class GAT(nn.Module):
                 causal_mask = q_idx >= kv_idx
                 
                 is_higher_level = levels[b, kv_idx] > 0
-                is_recent = (q_idx - kv_idx) <= self.t_keep
+                is_recent = (q_idx - kv_idx) <= self.memory_span
                 keep_mask = is_higher_level | is_recent 
                 return causal_mask & keep_mask
                 

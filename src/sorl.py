@@ -25,6 +25,14 @@ class SORLConfig:
     use_rhythmic_placeholders: bool = True # whether to use rhythmic placeholders
     use_spike_placeholders: bool = True # whether to use spike placeholders
 
+    # incremental abstraction search 
+    curriculum_ratio: float = 0.6 # ratio of curriculum iterations (after this total_step * ratio, abstraction is full-length)
+
+    # memory fading 
+    max_seq_len: Optional[int] = None # max sequence length for training data, useful for memory fading
+    use_fade_memory: bool = False # whether to use memory fading
+    min_keep: int = 1024 # default to same value as max_length
+
     # dataset specific
     train_dataset_path: Optional[str] = None
     val_dataset_path: Optional[str] = None
@@ -317,13 +325,24 @@ def evaluate(data: torch.Tensor, model: GAT, n: int, config: SORLConfig):
 
 
 class SearchScheduler: 
-    def __init__(self, sorl_config: SORLConfig, K: int, curriculum_ratio: float = 0.8): 
+    def __init__(self, sorl_config: SORLConfig, K: int): 
         self.sorl_config = sorl_config
         self.max_ts = min(sorl_config.max_length // K, sorl_config.max_t_search)
-        self.curriculum_iterations = int(sorl_config.train_iterations * curriculum_ratio)
+        self.curriculum_iterations = int(sorl_config.train_iterations * sorl_config.curriculum_ratio)
         self.t_delta = self.max_ts / self.curriculum_iterations
         self.t_search = 0 
 
+        # memory fading experiment || gradually decrease 't_keep' at the later half of training
+        self.K = K
+        self.use_fade_memory = sorl_config.use_fade_memory
+        self.max_memory_span = sorl_config.max_seq_len
+        self.min_memory_span = sorl_config.min_keep
+
+        # (To Be Fixed) logic here is a mess to me now ... 
+        self.memory_span = max(self.max_memory_span - (self.t_search * self.K) * int(self.use_fade_memory), self.min_memory_span) # memory that has coarser form, can fades
+
     def step(self): 
         self.t_search = min(self.t_search + self.t_delta, self.max_ts)
+        self.new_memory_span = max(self.max_memory_span - (self.t_search * self.K) * int(self.use_fade_memory), self.min_memory_span)
+        self.memory_span = max(int(0.7 * self.memory_span + 0.3 * self.new_memory_span), self.min_memory_span)
         return int(self.t_search)
