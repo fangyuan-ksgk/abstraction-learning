@@ -36,7 +36,7 @@ def validate(val_dataset: BaseDataset, gat: GAT,  config: SORLConfig):
 
 # Self organizing reinforcement learning (SoRL)
 # ------------------------------------------------------------------------------------------------
-def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_dataset: BaseDataset, gat: GAT, config: SORLConfig, start_step: int = 0, wandb_log_prefix: str = None): 
+def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_dataset: BaseDataset, gat: GAT, config: SORLConfig, start_step: int = 0): 
     
     optimizer = torch.optim.Adam(gat.parameters(), lr=config.learning_rate)
     scheduler = SearchScheduler(config, gat.K)
@@ -71,7 +71,7 @@ def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_datas
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        if global_step % config.log_interval == 0 and global_step > 0 and wandb_log_prefix:
+        if global_step % config.log_interval == 0 and global_step > 0:
             
             # Validation needs to be more rigorous : more samples
             gat.eval()
@@ -82,18 +82,18 @@ def self_organizing_reinforcement_learning(train_dataset: BaseDataset, val_datas
 
             
             wandb.log({
-                f"{wandb_log_prefix}/train/loss": loss.item(), 
-                f"{wandb_log_prefix}/train/ssl_loss": ssl_loss.item(), 
-                f"{wandb_log_prefix}/train/abs_loss": abs_loss.item(),
+                f"train/loss": loss.item(), 
+                f"train/ssl_loss": ssl_loss.item(), 
+                f"train/abs_loss": abs_loss.item(),
 
-                f"{wandb_log_prefix}/train/improve_ppl_percentage": improve_ppl_train.item(), 
-                f"{wandb_log_prefix}/train/abstraction_switch_ratio": switch_ratio, # how often greedy sampled abstraction is rejected for other abstraction
-                f"{wandb_log_prefix}/val(in-domain)/improve_ppl_percentage": validate_improve_ppl.item(), 
-                f"{wandb_log_prefix}/val(in-domain)/traj_ppl": validate_traj_ppl.item(), 
-                f"{wandb_log_prefix}/val(in-domain)/vocab_utilization_rate": validate_vocab_utilization_rate, 
+                f"train/improve_ppl_percentage": improve_ppl_train.item(), 
+                f"train/abstraction_switch_ratio": switch_ratio, # how often greedy sampled abstraction is rejected for other abstraction
+                f"val(in-domain)/improve_ppl_percentage": validate_improve_ppl.item(), 
+                f"val(in-domain)/traj_ppl": validate_traj_ppl.item(), 
+                f"val(in-domain)/vocab_utilization_rate": validate_vocab_utilization_rate, 
 
-                f"{wandb_log_prefix}/progress/iteration": global_step, 
-                f"{wandb_log_prefix}/progress/t_search": t_search, 
+                f"progress/iteration": global_step, 
+                f"progress/t_search": t_search, 
             }, step=global_step)
 
             gat.train()

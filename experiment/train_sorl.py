@@ -86,12 +86,18 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_len", type=int, default=17)
     parser.add_argument("--train_dataset_path", type=str, default="dataset/multiplication/100K-123.bin")
     parser.add_argument("--val_dataset_path", type=str, default="dataset/multiplication/2K-123.bin")
+    parser.add_argument("--run_name", type=str, default="SoRL-v4-heuristic-t-curriculum")
     args = parser.parse_args()
-    sorl_config = SORLConfig(**vars(args))
+    
+    from dataclasses import asdict, fields
+
+    sorl_fields = {f.name for f in fields(SORLConfig)}
+    sorl_args = {k: v for k, v in vars(args).items() if k in sorl_fields}
+    sorl_config = SORLConfig(**sorl_args)
 
     wandb.init(
         project="abstraction-learning2", 
-        name=f"SoRL-v4-heuristic-t-curriculum",
+        name=args.run_name,
         config={**asdict(sorl_config), **asdict(gat_config)}
     )
 
@@ -100,5 +106,4 @@ if __name__ == "__main__":
                                                             val_dataset, 
                                                             gat, 
                                                             sorl_config, 
-                                                            total_step, 
-                                                            wandb_log_prefix="generation-1")
+                                                            total_step)
